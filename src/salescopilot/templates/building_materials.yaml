@@ -1,0 +1,17 @@
+template: building_materials
+name: 建材
+thresholds:
+  first_response_minutes: 120
+  feedback_window_hours: 4
+  stale_followup_days: 3
+  zombie_ratio_max: 0.15
+flow:
+  - block: intake
+  - block: first_contact
+    label: 首次联系
+  - block: qualify
+    label: 需求确认
+  - block: proposal
+    label: 方案报价
+  - block: close
+    label: 成交/关闭

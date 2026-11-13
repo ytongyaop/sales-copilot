@@ -1,0 +1,19 @@
+template: software_outsourcing
+name: 软件外包
+thresholds:
+  first_response_minutes: 1440
+  feedback_window_hours: 24
+  stale_followup_days: 7
+  zombie_ratio_max: 0.1
+flow:
+  - block: intake
+  - block: first_contact
+    label: 首次联系
+  - block: qualify
+    label: 需求确认
+  - block: appointment
+    label: 方案会
+  - block: proposal
+    label: 方案报价
+  - block: close
+    label: 成交/关闭
