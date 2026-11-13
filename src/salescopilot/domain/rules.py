@@ -8,6 +8,7 @@
 from dataclasses import dataclass
 
 from salescopilot.domain.blocks import BLOCKS, Block
+from salescopilot.domain.models import ALLOWED_SOURCES
 
 REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow")
 REQUIRED_THRESHOLD_KEYS = (
@@ -26,6 +27,35 @@ class ValidationIssue:
 
     location: str
     message: str
+
+
+def validate_new_lead(*, name: str, contact: str, source: str) -> list[ValidationIssue]:
+    """校验一条待新建线索的入参；空列表表示可以落库。
+
+    规则：三个字段去掉首尾空格后都不能为空；`contact` 去空格后至少 5 个字符；
+    `source` 必须在 `ALLOWED_SOURCES` 里。问题逐条返回，不抛异常、不落库。
+    """
+    issues: list[ValidationIssue] = []
+
+    if not name.strip():
+        issues.append(ValidationIssue("name", "名称不能为空"))
+
+    stripped_contact = contact.strip()
+    if not stripped_contact:
+        issues.append(ValidationIssue("contact", "联系方式不能为空"))
+    elif len(stripped_contact) < 5:
+        issues.append(ValidationIssue("contact", "联系方式至少需要 5 个字符"))
+
+    stripped_source = source.strip()
+    allowed = "、".join(ALLOWED_SOURCES)
+    if not stripped_source:
+        issues.append(ValidationIssue("source", "来源不能为空"))
+    elif stripped_source not in ALLOWED_SOURCES:
+        issues.append(
+            ValidationIssue("source", f"来源必须是以下之一：{allowed}（实际是 {stripped_source}）")
+        )
+
+    return issues
 
 
 def validate_template(data: dict, blocks: dict[str, Block] = BLOCKS) -> list[ValidationIssue]:

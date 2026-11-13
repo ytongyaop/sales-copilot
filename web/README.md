@@ -1,20 +1,29 @@
-# web/ — 前端（待建）
+# web/ — 前端（Vue3 + Vite）
 
-Vue3 工程在 B2 之后建立，本目录现在只有这份说明。
+线索的新增与列表页。一个页面：上面是新增表单，下面是列表表格；只调用后端 HTTP 接口。
 
 ## 边界
 
 - 前端**只通过 HTTP 调后端**，不直接连数据库、不直接调模型 SDK。
 - 必填 / 阈值规则以后端为唯一真源，前端不复制一份当权威。
-- `node_modules/` 已在 `.gitignore` 里整体忽略，**不提交**；依赖由 `package.json` + lock 文件还原。
-- 后端停掉时，前端要显示看得懂的业务语言错误，而不是空白页或原始报错（对应 PRD 的"失败不白屏"）。
+- `node_modules/` 与 `dist/` 已在 `.gitignore` 里忽略，**不提交**；依赖由 `package.json` + lock 文件还原。
+- 后端停掉时，前端显示「服务未连接，请确认后端已启动（uvicorn ...）」，不白屏、不暴露原始报错。
 
-## 将来在这里跑的（B2 起，别现在建）
+## 怎么跑
+
+先起后端（仓库根）：
 
 ```powershell
-cd web
-npm install
-npm run dev
+$env:PYTHONPATH='src'
+uvicorn salescopilot.entrypoints.api.app:app --reload --port 8000
 ```
 
-工程尚未创建，上面命令此时跑不起来——这是有意的，B1 只交付可运行的空壳后端。
+再起前端（本目录）：
+
+```powershell
+npm install
+npm run dev        # http://localhost:5173
+```
+
+`vite.config.js` 把 `/api/*` 代理到 `http://127.0.0.1:8000`，并把前缀去掉：
+前端请求 `/api/leads` → 后端 `/leads`。生产构建 `npm run build` 输出到 `dist/`。

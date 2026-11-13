@@ -3,11 +3,11 @@ root_package = salescopilot
 # ASCII only: import-linter reads this file with the system encoding.
 
 [importlinter:contract:layers]
-name = Layers: (entrypoints | adapters) > services > domain
+name = Layers: entrypoints > (adapters | services) > domain
 type = layers
 layers =
-    salescopilot.entrypoints | salescopilot.adapters
-    salescopilot.services
+    salescopilot.entrypoints
+    salescopilot.adapters | salescopilot.services
     salescopilot.domain
 
 [importlinter:contract:services-not-adapters]

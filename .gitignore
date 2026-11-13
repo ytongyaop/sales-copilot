@@ -11,6 +11,7 @@ venv/
 
 # 前端（依赖装得回，不入库）
 node_modules/
+web/dist/
 
 # 本地数据：只保留占位，索引与数据库不入库
 data/*
