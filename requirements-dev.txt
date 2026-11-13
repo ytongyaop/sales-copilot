@@ -1,0 +1,38 @@
+# 开发依赖 — 由 `pip freeze` 全量导出
+# 生成日期：2026-11-13
+# 环境：Python 3.14.6 / Windows / venv 位于 .venv
+# 安装源：https://mirrors.aliyun.com/pypi/simple/
+# 说明：httpx2 / httpcore2 是 starlette 1.10 的 TestClient 依赖（fastapi.testclient 需要它们），
+#       不是业务依赖，只是为了让 tests/test_smoke.py 能跑。
+# 无重型依赖：不含 chromadb / openai / streamlit（B2 之后按需加）。
+
+annotated-doc==0.0.6
+annotated-types==0.8.0
+anyio==4.16.0
+click==8.5.1
+colorama==0.4.6
+fastapi==0.162.5
+grimp==3.19
+h11==0.16.0
+httpcore2==2.16.0
+httpx2==2.16.0
+idna==3.20
+import-linter==2.16
+iniconfig==2.3.1
+markdown-it-py==4.3.0
+mdurl==0.1.2
+opentelemetry-api==1.45.2
+packaging==26.3
+pluggy==1.7.0
+pydantic==2.14.3
+pydantic_core==2.50.4
+Pygments==2.21.0
+pytest==9.2.0
+PyYAML==6.0.3
+rich==15.0.0
+ruff==0.17.5
+starlette==1.10.0
+truststore==0.10.5
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+uvicorn==0.54.0

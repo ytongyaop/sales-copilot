@@ -1,0 +1,26 @@
+# 项目：销售副驾（sales-agent-v2）
+
+> 用法：放项目根。填 3 处（项目名 / 一句话 / 专属约束），命令与规则照用。
+> 全局门禁与流程：见 `AGENTS.md#门禁`（`~/.config/opencode/AGENTS.md`），此处不复制正文。
+
+## 是什么
+
+面向中小企业销售团队的流程引擎，用可组合流程块 + 行业模板把销售跟进流程变成可配置、可留痕、可度量的系统；AI 只负责生成话术草稿与归类异议。
+
+## 本地命令（本项目唯一事实源）
+
+- lint：`ruff check .`
+- test：`pytest -q`
+- 分层检查：`$env:PYTHONPATH='src'; lint-imports`
+- 跑接口：`uvicorn salescopilot.entrypoints.api.app:app --reload`
+
+## 本项目特有约束
+
+- 依赖方向只有 `entrypoints → services → domain`，`adapters` 与 `services` 平级；装配只在 `entrypoints`。
+- 新功能先在 `specs/NNN-短名/` 写 spec + plan + tasks；计划未确认不写代码。
+- 小修小补记 `docs/进度.md` 的 `## 修复记录`，不新开文档。
+<!-- 填写：项目专属的其它红线（数据源、禁改文件、外部服务）；没有就删本行 -->
+
+## 收尾
+
+- 一个增量一停：改 → 跑上面命令 → 贴输出 → 确认后再 commit。

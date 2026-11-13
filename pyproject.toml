@@ -1,0 +1,13 @@
+[project]
+name = "salescopilot"
+version = "0.1.0"
+description = "Sales process engine: composable flow blocks + industry templates + AI drafts."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]

@@ -1,0 +1,29 @@
+[importlinter]
+root_package = salescopilot
+# ASCII only: import-linter reads this file with the system encoding.
+
+[importlinter:contract:layers]
+name = Layers: (entrypoints | adapters) > services > domain
+type = layers
+layers =
+    salescopilot.entrypoints | salescopilot.adapters
+    salescopilot.services
+    salescopilot.domain
+
+[importlinter:contract:services-not-adapters]
+name = services must not import adapters
+type = forbidden
+source_modules =
+    salescopilot.services
+forbidden_modules =
+    salescopilot.adapters
+
+[importlinter:contract:domain-leaf]
+name = domain must not import other layers
+type = forbidden
+source_modules =
+    salescopilot.domain
+forbidden_modules =
+    salescopilot.entrypoints
+    salescopilot.services
+    salescopilot.adapters
