@@ -178,6 +178,17 @@ class IngestService:
         """该素材的提炼账本，按时间正序。"""
         return self._runs.list_for_raw(raw_id)
 
+    def model_for(self, fact: Fact) -> str | None:
+        """这条事实出自哪个模型：取同一原文最后一次提炼的 `model`。
+
+        人工补录（`raw_id` 为空）没有模型，返回 None；前端据此只显示「人工」，
+        不会把人工填的值误标成某个模型产出的。
+        """
+        if not fact.raw_id:
+            return None
+        runs = self._runs.list_for_raw(fact.raw_id)
+        return runs[-1].model if runs else None
+
     # ------------------------------------------------------------------ 事实
 
     def list_facts(self, lead_id: str) -> tuple[list[Fact], list[ValidationIssue]]:

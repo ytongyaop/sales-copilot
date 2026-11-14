@@ -5,7 +5,10 @@
 
 from typing import Protocol
 
+from salescopilot.domain.knowledge import Chunk
 from salescopilot.domain.models import (
+    Draft,
+    DraftResult,
     ExtractionResult,
     ExtractRun,
     Fact,
@@ -86,3 +89,46 @@ class FactExtractor(Protocol):
     """
 
     def extract(self, *, raw: RawItem, facts: list[Fact]) -> ExtractionResult: ...
+
+
+class DraftRepository(Protocol):
+    """草稿仓储端口：追加、按 id 查单条、按线索回查、改状态（pending → confirmed/discarded）。"""
+
+    def add(self, draft: Draft) -> None: ...
+
+    def get(self, draft_id: str) -> Draft | None: ...
+
+    def list_for(self, lead_id: str) -> list[Draft]: ...
+
+    def update_status(self, draft_id: str, status: str) -> None: ...
+
+
+class DraftGenerator(Protocol):
+    """话术生成器端口：只知道「线索 + 事实 + 资料片段」，返回草稿与用到的资料编号。
+
+    `used_hit_indexes` 是 `hits` 的**0 基下标**；一个都没有就表示「没用资料」，
+    用例层会拒绝入库。失败（网络、超时、输出解析不了）抛 `DraftError`。
+    """
+
+    def draft(self, *, lead: Lead, facts: list[Fact], hits: list[dict]) -> DraftResult: ...
+
+
+class Embedder(Protocol):
+    """向量化端口：一批文本进、一批向量出；模型名由实现自己报（写进索引清单比对）。"""
+
+    def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+class VectorStore(Protocol):
+    """向量库端口：清空、批量写入、按向量取 top-k、数块数。
+
+    `query` 回来的每项形如 `{"text", "source", "score"}`；`score` 越大越相近。
+    """
+
+    def reset(self) -> None: ...
+
+    def add(self, chunks: list[Chunk], vectors: list[list[float]]) -> None: ...
+
+    def query(self, vector: list[float], k: int = 4) -> list[dict]: ...
+
+    def count(self) -> int: ...

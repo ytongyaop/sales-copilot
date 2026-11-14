@@ -84,4 +84,24 @@ export function patchFact(leadId, field, value) {
   return request(`/leads/${leadId}/facts/${encodeURIComponent(field)}`, jsonOptions('PATCH', { value }))
 }
 
+// ---------------------------------------------------------------- 原文列表 / 话术草稿
+
+export function listRaws(leadId) {
+  return request(`/leads/${leadId}/raws`)
+}
+
+// 生成草稿：后端会先过「有事实 / 有资料依据 / 模型引用 / 无禁用词」四道门槛，
+// 不通过时返回 422 + issues，前端只负责把 message 逐条显示出来。
+export function createDraft(leadId) {
+  return request(`/leads/${leadId}/draft`, { method: 'POST' })
+}
+
+export function confirmDraft(leadId, draftId, payload) {
+  return request(`/leads/${leadId}/drafts/${draftId}/confirm`, jsonOptions('POST', payload))
+}
+
+export function discardDraft(leadId, draftId) {
+  return request(`/leads/${leadId}/drafts/${draftId}`, { method: 'DELETE' })
+}
+
 export { OFFLINE_MESSAGE }

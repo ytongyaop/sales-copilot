@@ -16,6 +16,7 @@ from pathlib import Path
 
 from salescopilot.domain.models import (
     DEFAULT_TEMPLATE,
+    Draft,
     ExtractRun,
     Fact,
     Followup,
@@ -86,6 +87,18 @@ CREATE TABLE IF NOT EXISTS extract_runs (
     seconds REAL NOT NULL,
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS drafts (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    citations_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    token INTEGER NOT NULL,
+    seconds REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 _LEADS_COLUMNS = (
@@ -112,6 +125,10 @@ _SELECT_FACT = (
 _SELECT_RUN = (
     "SELECT id, raw_id, model, prompt_version, input_hash, output_hash, candidates,"
     " accepted, skipped, token, seconds, at FROM extract_runs"
+)
+_SELECT_DRAFT = (
+    "SELECT id, lead_id, text, citations_json, status, model, prompt_version,"
+    " token, seconds, created_at FROM drafts"
 )
 DB_PATH_ENV = "SALESCOPILOT_DB"
 
@@ -444,6 +461,73 @@ class SqliteExtractRunRepository(_SqliteRepository):
             )
             for row in rows
         ]
+
+
+class SqliteDraftRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `DraftRepository` 的 SQLite 实现。
+
+    引用列表整段存 JSON（形状由 `domain/draft.py` 统一），本层只负责存取与改状态；
+    状态流转（pending → confirmed/discarded）由用例层判定，SQL 不做约束。
+    """
+
+    def add(self, draft: Draft) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO drafts "
+                "(id, lead_id, text, citations_json, status, model, prompt_version, "
+                "token, seconds, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    draft.id,
+                    draft.lead_id,
+                    draft.text,
+                    json.dumps(draft.citations, ensure_ascii=False),
+                    draft.status,
+                    draft.model,
+                    draft.prompt_version,
+                    draft.token,
+                    draft.seconds,
+                    draft.created_at,
+                ),
+            )
+
+    def get(self, draft_id: str) -> Draft | None:
+        with self._open() as conn:
+            row = conn.execute(f"{_SELECT_DRAFT} WHERE id = ?", (draft_id,)).fetchone()
+        return None if row is None else self._to_draft(row)
+
+    def list_for(self, lead_id: str) -> list[Draft]:
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_DRAFT} WHERE lead_id = ? ORDER BY created_at ASC, rowid ASC",
+                (lead_id,),
+            ).fetchall()
+        return [self._to_draft(row) for row in rows]
+
+    def update_status(self, draft_id: str, status: str) -> None:
+        with self._open() as conn:
+            conn.execute("UPDATE drafts SET status = ? WHERE id = ?", (status, draft_id))
+
+    @staticmethod
+    def _to_draft(row: sqlite3.Row) -> Draft:
+        try:
+            citations = json.loads(row["citations_json"] or "[]")
+        except json.JSONDecodeError:
+            citations = []
+        if not isinstance(citations, list):
+            citations = []
+        return Draft(
+            id=row["id"],
+            lead_id=row["lead_id"],
+            text=row["text"],
+            citations=citations,
+            status=row["status"],
+            model=row["model"],
+            prompt_version=row["prompt_version"],
+            token=row["token"],
+            seconds=row["seconds"],
+            created_at=row["created_at"],
+        )
 
 
 def default_db_path() -> Path:

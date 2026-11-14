@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.requests import Request
 
@@ -26,12 +26,14 @@ from salescopilot.domain.models import (
 )
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.entrypoints.bootstrap import (
+    build_draft_service,
     build_flow_service,
     build_followup_service,
     build_ingest_service,
     build_lead_service,
     templates,
 )
+from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
 from salescopilot.services.ingest import IngestService
@@ -93,6 +95,13 @@ class FactPatchIn(BaseModel):
     value: str
 
 
+class DraftConfirmIn(BaseModel):
+    """POST /leads/{id}/drafts/{draft_id}/confirm 的请求体：人工补的异议与下次跟进时间。"""
+
+    objection: str
+    next_followup_at: str
+
+
 def get_lead_service() -> Iterator[LeadService]:
     """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
 
@@ -113,10 +122,15 @@ def get_ingest_service() -> Iterator[IngestService]:
     yield build_ingest_service()
 
 
+def get_draft_service() -> Iterator[DraftService]:
+    yield build_draft_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
 IngestDep = Annotated[IngestService, Depends(get_ingest_service)]
+DraftDep = Annotated[DraftService, Depends(get_draft_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -168,7 +182,8 @@ def _raw_body(item: RawItem) -> dict:
     }
 
 
-def _fact_body(fact: Fact) -> dict:
+def _fact_body(fact: Fact, *, model: str | None = None) -> dict:
+    """一条事实：`model` 只在 `source=llm` 且有账本时给（前端徽标显示 `AI·<模型名>`）。"""
     return {
         "id": fact.id,
         "lead_id": fact.lead_id,
@@ -179,6 +194,7 @@ def _fact_body(fact: Fact) -> dict:
         "source_span": fact.source_span,
         "confidence": fact.confidence,
         "locked": fact.locked,
+        "model": model,
         "at": fact.at,
     }
 
@@ -346,7 +362,10 @@ def extract_raw(raw_id: str, service: IngestDep):
         return JSONResponse(status_code=status, content=_issue_body(outcome.issues))
 
     return {
-        "accepted": [_fact_body(fact) for fact in outcome.accepted],
+        "accepted": [
+            _fact_body(fact, model=None if outcome.run is None else outcome.run.model)
+            for fact in outcome.accepted
+        ],
         "skipped": [
             {"location": issue.location, "message": issue.message} for issue in outcome.skipped
         ],
@@ -354,13 +373,26 @@ def extract_raw(raw_id: str, service: IngestDep):
     }
 
 
+@app.get("/leads/{lead_id}/raws")
+def list_raws(lead_id: str, service: IngestDep):
+    """该线索的原始素材：按登记时间正序；线索不存在 404，没有素材返回 `[]`。"""
+    items, issues = service.list_raws(lead_id)
+    if issues:
+        return JSONResponse(status_code=404, content=_issue_body(issues))
+    return [_raw_body(item) for item in items]
+
+
 @app.get("/leads/{lead_id}/facts")
 def list_facts(lead_id: str, service: IngestDep):
-    """该线索的事实：按时间正序；线索不存在 404，没有事实返回 `[]`。"""
+    """该线索的事实：按时间正序；线索不存在 404，没有事实返回 `[]`。
+
+    每条事实额外带 `model`：模型产出的取自对应提炼账本（前端显示 `AI·<模型名>`），
+    人工补录的为 null（前端显示「人工」），不会把两者混成一句「AI」。
+    """
     facts, issues = service.list_facts(lead_id)
     if issues:
         return JSONResponse(status_code=404, content=_issue_body(issues))
-    return [_fact_body(fact) for fact in facts]
+    return [_fact_body(fact, model=service.model_for(fact)) for fact in facts]
 
 
 @app.patch("/leads/{lead_id}/facts/{field}")
@@ -386,3 +418,58 @@ def unlock_fact(lead_id: str, field: str, service: IngestDep):
         status = 404 if missing else 422
         return JSONResponse(status_code=status, content=_issue_body(issues))
     return _fact_body(fact)
+
+
+# ---------------------------------------------------------------- 话术草稿
+
+
+def _draft_status(issues: list[ValidationIssue]) -> int:
+    """草稿接口的状态码：线索/草稿不存在 404、状态冲突 409、其余校验不过 422。"""
+    if any(issue.location == "lead_id" for issue in issues):
+        return 404
+    if any(issue.location == "draft" and "不存在" in issue.message for issue in issues):
+        return 404
+    if any(issue.location == "draft" and "不能再次操作" in issue.message for issue in issues):
+        return 409
+    return 422
+
+
+@app.post("/leads/{lead_id}/draft")
+def generate_draft(lead_id: str, service: DraftDep):
+    """基于事实与资料生成一条草稿：成功 200；被门槛拦下时 422 并列出原因。
+
+    `citations` 只有模型真正引用的资料片段（编号来源由服务层换算），
+    前端展示时必须与 `text` 一起看，避免把无引用的草稿当成结论。
+    """
+    outcome, issues = service.generate(lead_id)
+    if not outcome.ok:
+        return JSONResponse(status_code=_draft_status(issues), content=_issue_body(issues))
+    return {
+        "draft_id": outcome.draft_id,
+        "text": outcome.text,
+        "citations": outcome.citations,
+        "model": outcome.model,
+    }
+
+
+@app.post("/leads/{lead_id}/drafts/{draft_id}/confirm", status_code=201)
+def confirm_draft(lead_id: str, draft_id: str, payload: DraftConfirmIn, service: DraftDep):
+    """确认草稿落库成跟进留痕：成功 201 返回那条跟进；草稿不存在 404，已处理过 409。"""
+    item, issues = service.confirm(
+        lead_id,
+        draft_id,
+        objection=payload.objection,
+        next_followup_at=payload.next_followup_at,
+    )
+    if item is None:
+        return JSONResponse(status_code=_draft_status(issues), content=_issue_body(issues))
+    return _followup_body(item)
+
+
+@app.delete("/leads/{lead_id}/drafts/{draft_id}", status_code=204)
+def discard_draft(lead_id: str, draft_id: str, service: DraftDep):
+    """丢弃草稿：只改状态不删记录；成功 204，草稿不存在 404，已处理过 409。"""
+    draft, issues = service.discard(lead_id, draft_id)
+    if draft is None:
+        return JSONResponse(status_code=_draft_status(issues), content=_issue_body(issues))
+    return Response(status_code=204)

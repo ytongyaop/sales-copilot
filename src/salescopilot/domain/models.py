@@ -18,6 +18,11 @@ ALLOWED_SOURCES: tuple[str, ...] = ("referral", "inbound", "outbound", "event", 
 # 异议类型：通用分类，不是行业词；扩展枚举同样只改这里。
 ALLOWED_OBJECTIONS: tuple[str, ...] = ("price", "time", "effect", "trust", "other")
 
+# 草稿状态：生成即 pending；确认落库后 confirmed；人工丢弃后 discarded（不再可确认）。
+DRAFT_PENDING = "pending"
+DRAFT_CONFIRMED = "confirmed"
+DRAFT_DISCARDED = "discarded"
+
 
 @dataclass(frozen=True)
 class Lead:
@@ -133,3 +138,37 @@ class ExtractRun:
     token: int
     seconds: float
     at: str
+
+
+@dataclass(frozen=True)
+class DraftResult:
+    """一次话术生成的原样产出：正文、用到的资料编号、以及这次生成的成本证据。
+
+    - `used_hit_indexes`：用到的检索结果下标（**0 基**，指向 `hits[i]`）；空列表表示
+      模型没引用任何资料——用例层据此拒绝入库，不允许「无出处的草稿」；
+    - `model` / `prompt_version`：写进草稿记录，前端据此显示 `AI·<模型名>`；
+    - `token` / `seconds`：假模型固定 0，真模型由适配器自行测量。
+    """
+
+    text: str
+    used_hit_indexes: list[int]
+    model: str
+    prompt_version: str
+    token: int
+    seconds: float
+
+
+@dataclass(frozen=True)
+class Draft:
+    """一条话术草稿：正文 ＋ 引用 ＋ 状态（pending / confirmed / discarded）与成本证据。"""
+
+    id: str
+    lead_id: str
+    text: str
+    citations: list[dict]
+    status: str
+    model: str
+    prompt_version: str
+    token: int
+    seconds: float
+    created_at: str

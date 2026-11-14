@@ -2,9 +2,12 @@
 import { onMounted, ref } from 'vue'
 import {
   advanceLead,
+  confirmDraft,
+  createDraft,
   createFollowup,
   createLead,
   createRaw,
+  discardDraft,
   extractRaw,
   listFacts,
   listFollowups,
@@ -73,6 +76,14 @@ const editingField = ref({})
 const editValue = ref({})
 const newFact = ref({})
 
+// 话术草稿：每个线索一份独立的草稿、问题列表与确认表单，互不影响。
+// `model` 必须显示出来（AI·fake / AI·deepseek），免得把假模型的输出当成真结论。
+const draft = ref({})
+const draftIssues = ref({})
+const draftError = ref({})
+const draftBusy = ref({})
+const confirmForm = ref({})
+
 function sourceLabel(value) {
   const hit = SOURCES.find((item) => item.value === value)
   return hit ? hit.label : value
@@ -98,8 +109,12 @@ function factValueLabel(fact) {
   return fact.field === 'objection' ? objectionLabel(fact.value) : fact.value
 }
 
-function factSourceLabel(source) {
-  return SOURCE_LABELS[source] || source
+function factSourceLabel(fact) {
+  // 模型产出的事实带上模型名（AI·fake / AI·deepseek），人工/规则仍是中文徽标。
+  if (fact.source === 'llm') {
+    return fact.model ? `AI·${fact.model}` : 'AI'
+  }
+  return SOURCE_LABELS[fact.source] || fact.source
 }
 
 // 「下一阶段」由后端给的模板 flow 计算，不在前端复制流程规则。
@@ -204,6 +219,7 @@ async function toggleFollowups(lead) {
   followupForm.value = { conclusion: '', objection: 'price', next_followup_at: '' }
   followupErrors.value = { ...followupErrors.value, [lead.id]: '' }
   newFact.value = { ...newFact.value, [lead.id]: { field: 'need', value: '' } }
+  clearDraft(lead.id)
   await loadFollowups(lead.id)
   await loadFacts(lead.id)
 }
@@ -310,10 +326,72 @@ async function saveEdit(lead, field) {
 }
 
 async function addFact(lead) {
-  const draft = newFact.value[lead.id]
-  if (!draft) return
-  const ok = await writeFact(lead, draft.field, draft.value || '')
-  if (ok) newFact.value = { ...newFact.value, [lead.id]: { field: draft.field, value: '' } }
+  const draftFact = newFact.value[lead.id]
+  if (!draftFact) return
+  const ok = await writeFact(lead, draftFact.field, draftFact.value || '')
+  if (ok) newFact.value = { ...newFact.value, [lead.id]: { field: draftFact.field, value: '' } }
+}
+
+// -------------------------------------------------------------- 话术草稿
+
+async function generateDraft(lead) {
+  draftBusy.value = { ...draftBusy.value, [lead.id]: 'generate' }
+  draftIssues.value = { ...draftIssues.value, [lead.id]: [] }
+  try {
+    const result = await createDraft(lead.id)
+    draft.value = { ...draft.value, [lead.id]: result }
+    confirmForm.value = {
+      ...confirmForm.value,
+      [lead.id]: { objection: 'price', next_followup_at: '' },
+    }
+  } catch (err) {
+    // 被门槛拦下时后端给的是 issues（中文原因），逐条显示；网络错只有 message。
+    draftIssues.value = { ...draftIssues.value, [lead.id]: draftIssueList(err) }
+  } finally {
+    draftBusy.value = { ...draftBusy.value, [lead.id]: '' }
+  }
+}
+
+async function submitDraft(lead) {
+  const current = draft.value[lead.id]
+  if (!current) return
+
+  const form = confirmForm.value[lead.id] || { objection: 'price', next_followup_at: '' }
+  draftBusy.value = { ...draftBusy.value, [lead.id]: 'confirm' }
+  draftIssues.value = { ...draftIssues.value, [lead.id]: [] }
+  try {
+    await confirmDraft(lead.id, current.draft_id, form)
+    clearDraft(lead.id)
+    await loadFollowups(lead.id)
+  } catch (err) {
+    draftIssues.value = { ...draftIssues.value, [lead.id]: draftIssueList(err) }
+  } finally {
+    draftBusy.value = { ...draftBusy.value, [lead.id]: '' }
+  }
+}
+
+async function dropDraft(lead) {
+  const current = draft.value[lead.id]
+  if (!current) return
+
+  draftBusy.value = { ...draftBusy.value, [lead.id]: 'discard' }
+  try {
+    await discardDraft(lead.id, current.draft_id)
+    clearDraft(lead.id)
+  } catch (err) {
+    draftIssues.value = { ...draftIssues.value, [lead.id]: draftIssueList(err) }
+  } finally {
+    draftBusy.value = { ...draftBusy.value, [lead.id]: '' }
+  }
+}
+
+function draftIssueList(err) {
+  return err.issues && err.issues.length > 0 ? err.issues : [{ message: err.message }]
+}
+
+function clearDraft(leadId) {
+  draft.value = { ...draft.value, [leadId]: null }
+  draftIssues.value = { ...draftIssues.value, [leadId]: [] }
 }
 
 onMounted(async () => {
@@ -532,7 +610,7 @@ onMounted(async () => {
                           </button>
                         </td>
                         <td>
-                          <span class="badge">{{ factSourceLabel(fact.source) }}</span>
+                          <span class="badge">{{ factSourceLabel(fact) }}</span>
                           <span v-if="fact.locked" class="badge lock">已锁定</span>
                         </td>
                         <td>{{ (fact.confidence * 100).toFixed(0) }}%</td>
@@ -561,6 +639,61 @@ onMounted(async () => {
                     </button>
                   </div>
                 </details>
+
+                <div class="draft-box">
+                  <div class="row-actions">
+                    <button
+                      type="button"
+                      :disabled="!facts[lead.id] || facts[lead.id].length === 0 || draftBusy[lead.id] === 'generate'"
+                      @click="generateDraft(lead)"
+                    >
+                      {{ draftBusy[lead.id] === 'generate' ? '生成中…' : '生成话术草稿' }}
+                    </button>
+                    <span v-if="draft[lead.id]" class="badge">AI·{{ draft[lead.id].model }}</span>
+                    <span v-if="!facts[lead.id] || facts[lead.id].length === 0" class="muted">
+                      先提炼或补录事实，才能生成话术
+                    </span>
+                  </div>
+
+                  <ul v-if="(draftIssues[lead.id] || []).length" class="draft-issues">
+                    <li v-for="(issue, index) in draftIssues[lead.id]" :key="index">
+                      {{ issue.message }}
+                    </li>
+                  </ul>
+
+                  <div v-if="draft[lead.id]" class="draft-result">
+                    <p class="draft-text">{{ draft[lead.id].text }}</p>
+                    <ol class="citation-list">
+                      <li v-for="(cite, index) in draft[lead.id].citations" :key="index">
+                        [{{ index + 1 }}] 来源：{{ cite.source }}　片段：{{ cite.text }}
+                      </li>
+                    </ol>
+
+                    <div class="row-actions">
+                      <select v-model="confirmForm[lead.id].objection">
+                        <option v-for="item in OBJECTIONS" :key="item.value" :value="item.value">
+                          {{ item.label }}
+                        </option>
+                      </select>
+                      <input v-model="confirmForm[lead.id].next_followup_at" type="date" />
+                      <button
+                        type="button"
+                        :disabled="!confirmForm[lead.id].next_followup_at || draftBusy[lead.id] === 'confirm'"
+                        @click="submitDraft(lead)"
+                      >
+                        {{ draftBusy[lead.id] === 'confirm' ? '落库中…' : '确认落库' }}
+                      </button>
+                      <button
+                        type="button"
+                        class="ghost"
+                        :disabled="draftBusy[lead.id] === 'discard'"
+                        @click="dropDraft(lead)"
+                      >
+                        丢弃
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </td>
             </tr>
           </template>
@@ -772,6 +905,45 @@ details.inline > summary {
 .hint {
   color: #57606a;
   margin: 0;
+}
+.draft-box {
+  margin-top: 12px;
+  border-top: 1px dashed #e1e4e8;
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.draft-issues {
+  margin: 0;
+  padding: 8px 10px 8px 28px;
+  border: 1px solid #ffc1c0;
+  border-radius: 6px;
+  background: #fff0ef;
+  color: #a40e26;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.draft-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+.draft-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.8;
+}
+.citation-list {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #57606a;
 }
 .error {
   margin: 12px 0 0;

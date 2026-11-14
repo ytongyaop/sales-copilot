@@ -50,6 +50,13 @@ def require_chat_key(settings: Settings) -> str:
     return settings.deepseek_api_key
 
 
+def require_embed_key(settings: Settings) -> str:
+    """要真向量时必须先有 key；缺失直接抛业务语言错误，不偷偷退回假向量。"""
+    if not settings.dashscope_api_key:
+        raise ConfigError("缺少 DASHSCOPE_API_KEY：请在项目根 .env 中配置")
+    return settings.dashscope_api_key
+
+
 def env_path() -> Path:
     """仓库根 `.env` 的位置：`src/salescopilot/config.py` 往上两级就是仓库根。"""
     return Path(__file__).resolve().parents[2] / ".env"
