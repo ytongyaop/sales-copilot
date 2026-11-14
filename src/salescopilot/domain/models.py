@@ -99,6 +99,25 @@ class Fact:
 
 
 @dataclass(frozen=True)
+class ExtractionResult:
+    """一次提炼的原始产出：候选 ＋ 产出它们的证据（谁出的、多贵、多久、哈希）。
+
+    - `candidates`：提炼器原样吐出的候选，每项形如
+      `{"field", "value", "source_span", "confidence"}`；合规与否由 `domain/facts.py` 判；
+    - `model` / `prompt_version`：写进账本，用于回放与漂移对比；
+    - `token` / `seconds`：真实耗用（假模型固定 0，真模型由适配器测量）；
+    - `raw_output_hash`：对模型返回文本算的哈希，同输出必同哈希。
+    """
+
+    candidates: list[dict]
+    model: str
+    prompt_version: str
+    token: int
+    seconds: float
+    raw_output_hash: str
+
+
+@dataclass(frozen=True)
 class ExtractRun:
     """一次提炼的账本：哪个模型、哪版提示词、进出哈希、候选/采纳/丢弃计数与耗用。"""
 

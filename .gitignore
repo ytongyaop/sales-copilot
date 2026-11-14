@@ -18,6 +18,7 @@ data/*
 !data/.gitkeep
 !data/knowledge/
 !data/seed/
+!data/evalsets/
 data/index/
 *.sqlite3
 

@@ -11,11 +11,17 @@
 用来反证「无出处即丢弃」。
 """
 
+import hashlib
+import json
 import re
 
-from salescopilot.domain.models import Fact, RawItem
+from salescopilot.domain.models import ExtractionResult, Fact, RawItem
 
 DEFAULT_CONFIDENCE = 0.8
+
+# 写进提炼账本的模型名与提示词版本：假模型固定这两个值，不与真模型混淆。
+MODEL_NAME = "fake"
+PROMPT_VERSION = "v0"
 
 _PRICE_WORDS = ("贵", "价格", "便宜")
 _HESITATE_WORDS = ("考虑", "再说", "商量")
@@ -26,17 +32,12 @@ _AMOUNT_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?\s*(?:万|元)")
 
 
 class FakeExtractor:
-    """关键词提炼器：命中什么就报什么，命中片段原样作为 `source_span`。
-
-    `name` 会被写进提炼账本（`ExtractRun.model`），换成真模型时同样带一个名字。
-    """
-
-    name = "fake-v0"
+    """关键词提炼器：命中什么就报什么，命中片段原样作为 `source_span`。"""
 
     def __init__(self, *, bad_mode: bool = False) -> None:
         self._bad_mode = bad_mode
 
-    def extract(self, *, raw: RawItem, facts: list[Fact]) -> list[dict]:
+    def extract(self, *, raw: RawItem, facts: list[Fact]) -> ExtractionResult:
         """按固定规则顺序产出候选；`facts` 只在真模型里当上下文用，假模型不看。"""
         content = raw.content
         candidates: list[dict] = []
@@ -72,7 +73,22 @@ class FakeExtractor:
                 }
             )
 
-        return candidates
+        return ExtractionResult(
+            candidates=candidates,
+            model=MODEL_NAME,
+            prompt_version=PROMPT_VERSION,
+            token=0,
+            seconds=0.0,
+            raw_output_hash=_payload_hash(raw, candidates),
+        )
+
+
+def _payload_hash(raw: RawItem, candidates: list[dict]) -> str:
+    """原文 + 候选 JSON 的稳定哈希：同一段原文永远同一哈希（假模型无需真返回文本）。"""
+    payload = (
+        raw.content + "\n" + json.dumps(candidates, ensure_ascii=False, sort_keys=True, default=str)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _candidate(field: str, value: str, span: str) -> dict:

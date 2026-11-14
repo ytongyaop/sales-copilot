@@ -4,9 +4,13 @@ import {
   advanceLead,
   createFollowup,
   createLead,
+  createRaw,
+  extractRaw,
+  listFacts,
   listFollowups,
   listLeads,
   listTemplates,
+  patchFact,
 } from './api'
 
 // 来源下拉：与后端 ALLOWED_SOURCES 一一对应，这里只是显示文案，取值以字符串为准。
@@ -35,6 +39,18 @@ const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
 
+// 事实字段的中文名：只影响显示，字段名本身是机器契约（与后端 ALLOWED_FACT_FIELDS 对齐）。
+const FACT_FIELDS = [
+  { value: 'decision_maker', label: '决策人' },
+  { value: 'need', label: '核心需求' },
+  { value: 'objection', label: '异议' },
+  { value: 'amount', label: '金额' },
+  { value: 'appointment_at', label: '约定时间' },
+]
+
+// 来源徽标：后端只产这三种来源，前端只负责翻译。
+const SOURCE_LABELS = { llm: 'AI', manual: '人工', rule: '规则' }
+
 // 每个线索的展开状态、跟进记录与错误各自独立，避免一行报错串到别的行。
 const expandedId = ref('')
 const followups = ref({})
@@ -42,6 +58,20 @@ const followupErrors = ref({})
 const followupForm = ref({ conclusion: '', objection: 'price', next_followup_at: '' })
 const busyId = ref('')
 const savingFollowup = ref(false)
+
+// 每个线索的原文与事实也各自独立：一个线索报错不影响别的线索。
+const rawText = ref({})
+const savedRaw = ref({})
+const rawHint = ref({})
+const rawError = ref({})
+const extractInfo = ref({})
+const facts = ref({})
+const factsLoading = ref({})
+const factsError = ref({})
+const busyFacts = ref({})
+const editingField = ref({})
+const editValue = ref({})
+const newFact = ref({})
 
 function sourceLabel(value) {
   const hit = SOURCES.find((item) => item.value === value)
@@ -56,6 +86,20 @@ function objectionLabel(value) {
 function formatTime(iso) {
   if (!iso) return '-'
   return iso.replace('T', ' ').slice(0, 16)
+}
+
+// 事实相关的中文名：字段名、来源徽标、异议枚举都只做显示翻译，不复制后端规则。
+function factFieldLabel(field) {
+  const hit = FACT_FIELDS.find((item) => item.value === field)
+  return hit ? hit.label : field
+}
+
+function factValueLabel(fact) {
+  return fact.field === 'objection' ? objectionLabel(fact.value) : fact.value
+}
+
+function factSourceLabel(source) {
+  return SOURCE_LABELS[source] || source
 }
 
 // 「下一阶段」由后端给的模板 flow 计算，不在前端复制流程规则。
@@ -159,7 +203,9 @@ async function toggleFollowups(lead) {
   expandedId.value = lead.id
   followupForm.value = { conclusion: '', objection: 'price', next_followup_at: '' }
   followupErrors.value = { ...followupErrors.value, [lead.id]: '' }
+  newFact.value = { ...newFact.value, [lead.id]: { field: 'need', value: '' } }
   await loadFollowups(lead.id)
+  await loadFacts(lead.id)
 }
 
 async function saveFollowup(lead) {
@@ -174,6 +220,100 @@ async function saveFollowup(lead) {
   } finally {
     savingFollowup.value = false
   }
+}
+
+// -------------------------------------------------------------- 原文 → 事实
+
+async function loadFacts(leadId) {
+  factsLoading.value = { ...factsLoading.value, [leadId]: true }
+  factsError.value = { ...factsError.value, [leadId]: '' }
+  try {
+    facts.value = { ...facts.value, [leadId]: await listFacts(leadId) }
+  } catch (err) {
+    factsError.value = { ...factsError.value, [leadId]: err.message }
+  } finally {
+    factsLoading.value = { ...factsLoading.value, [leadId]: false }
+  }
+}
+
+async function saveRaw(lead) {
+  const text = (rawText.value[lead.id] || '').trim()
+  busyFacts.value = { ...busyFacts.value, [lead.id]: 'save' }
+  rawError.value = { ...rawError.value, [lead.id]: '' }
+  rawHint.value = { ...rawHint.value, [lead.id]: '' }
+  try {
+    const item = await createRaw(lead.id, { content: text, source: '手动粘贴' })
+    savedRaw.value = { ...savedRaw.value, [lead.id]: item }
+    rawText.value = { ...rawText.value, [lead.id]: '' }
+    // 换了原文，旧的提炼结果就不作数了（免得对着新原文看旧数字）。
+    extractInfo.value = { ...extractInfo.value, [lead.id]: null }
+    rawHint.value = {
+      ...rawHint.value,
+      [lead.id]: item.duplicated ? '这段原文之前已经录过，可以直接提炼。' : '原文已保存，可以提炼了。',
+    }
+  } catch (err) {
+    rawError.value = { ...rawError.value, [lead.id]: err.message }
+  } finally {
+    busyFacts.value = { ...busyFacts.value, [lead.id]: '' }
+  }
+}
+
+async function runExtract(lead) {
+  const raw = savedRaw.value[lead.id]
+  if (!raw) return
+
+  busyFacts.value = { ...busyFacts.value, [lead.id]: 'extract' }
+  rawError.value = { ...rawError.value, [lead.id]: '' }
+  rawHint.value = { ...rawHint.value, [lead.id]: '' }
+  try {
+    const result = await extractRaw(raw.id)
+    extractInfo.value = {
+      ...extractInfo.value,
+      [lead.id]: { accepted: result.accepted.length, skipped: result.skipped },
+    }
+    await loadFacts(lead.id)
+  } catch (err) {
+    rawError.value = { ...rawError.value, [lead.id]: err.message }
+  } finally {
+    busyFacts.value = { ...busyFacts.value, [lead.id]: '' }
+  }
+}
+
+// 人工写一个字段（编辑已有或补录）：后端负责 upsert 与锁定，前端只发值和刷新。
+async function writeFact(lead, field, value) {
+  busyFacts.value = { ...busyFacts.value, [lead.id]: 'patch' }
+  factsError.value = { ...factsError.value, [lead.id]: '' }
+  try {
+    await patchFact(lead.id, field, value)
+    await loadFacts(lead.id)
+    return true
+  } catch (err) {
+    factsError.value = { ...factsError.value, [lead.id]: err.message }
+    return false
+  } finally {
+    busyFacts.value = { ...busyFacts.value, [lead.id]: '' }
+  }
+}
+
+function startEdit(lead, fact) {
+  editingField.value = { ...editingField.value, [lead.id]: fact.field }
+  editValue.value = { ...editValue.value, [lead.id]: fact.value }
+}
+
+function cancelEdit(lead) {
+  editingField.value = { ...editingField.value, [lead.id]: '' }
+}
+
+async function saveEdit(lead, field) {
+  const ok = await writeFact(lead, field, editValue.value[lead.id] || '')
+  if (ok) editingField.value = { ...editingField.value, [lead.id]: '' }
+}
+
+async function addFact(lead) {
+  const draft = newFact.value[lead.id]
+  if (!draft) return
+  const ok = await writeFact(lead, draft.field, draft.value || '')
+  if (ok) newFact.value = { ...newFact.value, [lead.id]: { field: draft.field, value: '' } }
 }
 
 onMounted(async () => {
@@ -303,6 +443,124 @@ onMounted(async () => {
                     <span class="muted">下次：{{ item.next_followup_at }} · 记录于 {{ formatTime(item.at) }}</span>
                   </li>
                 </ul>
+
+                <details class="panel">
+                  <summary>原文提炼与事实</summary>
+
+                  <div class="raw-box">
+                    <textarea
+                      v-model="rawText[lead.id]"
+                      rows="3"
+                      placeholder="粘贴客户原话或聊天记录（至少 10 个字）"
+                    ></textarea>
+                    <div class="row-actions">
+                      <button
+                        type="button"
+                        :disabled="busyFacts[lead.id] === 'save'"
+                        @click="saveRaw(lead)"
+                      >
+                        {{ busyFacts[lead.id] === 'save' ? '保存中…' : '保存原文' }}
+                      </button>
+                      <button
+                        type="button"
+                        class="ghost"
+                        :disabled="!savedRaw[lead.id] || busyFacts[lead.id] === 'extract'"
+                        @click="runExtract(lead)"
+                      >
+                        {{ busyFacts[lead.id] === 'extract' ? '提炼中…' : '提炼' }}
+                      </button>
+                    </div>
+
+                    <p v-if="rawError[lead.id]" class="error">{{ rawError[lead.id] }}</p>
+                    <p v-if="rawHint[lead.id]" class="hint">{{ rawHint[lead.id] }}</p>
+
+                    <div v-if="extractInfo[lead.id]" class="extract-result">
+                      <p class="hint">本次采纳 {{ extractInfo[lead.id].accepted }} 条</p>
+                      <details v-if="extractInfo[lead.id].skipped.length" class="inline">
+                        <summary class="muted">
+                          跳过 {{ extractInfo[lead.id].skipped.length }} 条（点击看原因）
+                        </summary>
+                        <ul class="skip-list">
+                          <li
+                            v-for="(item, index) in extractInfo[lead.id].skipped"
+                            :key="index"
+                            class="muted"
+                          >
+                            {{ item.location }}：{{ item.message }}
+                          </li>
+                        </ul>
+                      </details>
+                    </div>
+                  </div>
+
+                  <p v-if="factsLoading[lead.id]" class="hint">事实加载中…</p>
+                  <p v-else-if="!facts[lead.id] || facts[lead.id].length === 0" class="hint">
+                    还没有事实：先粘贴原文提炼，或在下方手工补一条。
+                  </p>
+                  <table v-else class="fact-table">
+                    <thead>
+                      <tr>
+                        <th>字段</th>
+                        <th>值（点一下可改）</th>
+                        <th>来源</th>
+                        <th>置信度</th>
+                        <th>原文片段</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="fact in facts[lead.id]" :key="fact.id">
+                        <td>{{ factFieldLabel(fact.field) }}</td>
+                        <td>
+                          <div v-if="editingField[lead.id] === fact.field" class="row-actions">
+                            <select v-if="fact.field === 'objection'" v-model="editValue[lead.id]">
+                              <option v-for="item in OBJECTIONS" :key="item.value" :value="item.value">
+                                {{ item.label }}
+                              </option>
+                            </select>
+                            <input v-else v-model="editValue[lead.id]" type="text" />
+                            <button
+                              type="button"
+                              :disabled="busyFacts[lead.id] === 'patch'"
+                              @click="saveEdit(lead, fact.field)"
+                            >
+                              保存
+                            </button>
+                            <button type="button" class="ghost" @click="cancelEdit(lead)">取消</button>
+                          </div>
+                          <button v-else type="button" class="value" @click="startEdit(lead, fact)">
+                            {{ factValueLabel(fact) }}
+                          </button>
+                        </td>
+                        <td>
+                          <span class="badge">{{ factSourceLabel(fact.source) }}</span>
+                          <span v-if="fact.locked" class="badge lock">已锁定</span>
+                        </td>
+                        <td>{{ (fact.confidence * 100).toFixed(0) }}%</td>
+                        <td><span class="muted">「{{ fact.source_span }}」</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  <p v-if="factsError[lead.id]" class="error">{{ factsError[lead.id] }}</p>
+
+                  <div v-if="newFact[lead.id]" class="add-fact">
+                    <span class="muted">手工补一条</span>
+                    <select v-model="newFact[lead.id].field">
+                      <option v-for="item in FACT_FIELDS" :key="item.value" :value="item.value">
+                        {{ item.label }}
+                      </option>
+                    </select>
+                    <select v-if="newFact[lead.id].field === 'objection'" v-model="newFact[lead.id].value">
+                      <option v-for="item in OBJECTIONS" :key="item.value" :value="item.value">
+                        {{ item.label }}
+                      </option>
+                    </select>
+                    <input v-else v-model="newFact[lead.id].value" type="text" placeholder="填写取值" />
+                    <button type="button" :disabled="busyFacts[lead.id] === 'patch'" @click="addFact(lead)">
+                      保存
+                    </button>
+                  </div>
+                </details>
               </td>
             </tr>
           </template>
@@ -427,6 +685,86 @@ th {
   background: #eef2f7;
   color: #3d4653;
   font-size: 12px;
+}
+.badge.lock {
+  background: #fff4d6;
+  color: #7a5b00;
+}
+.panel {
+  margin-top: 12px;
+  border-top: 1px dashed #e1e4e8;
+  padding-top: 10px;
+  font-size: 13px;
+}
+.panel > summary,
+details.inline > summary {
+  cursor: pointer;
+  color: #57606a;
+  font-size: 13px;
+}
+.raw-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+}
+.raw-box textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #1f2328;
+  resize: vertical;
+}
+.row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.row-actions input,
+.row-actions select,
+.add-fact input,
+.add-fact select {
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #1f2328;
+  background: #fff;
+}
+.extract-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skip-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.fact-table {
+  margin: 8px 0;
+  font-size: 13px;
+}
+.fact-table button.value {
+  padding: 2px 6px;
+  background: #f6f8fa;
+  color: #1f2328;
+  border: 1px solid #d0d7de;
+  font-size: 13px;
+  text-align: left;
+}
+.add-fact {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px dashed #e1e4e8;
 }
 .muted {
   color: #8a939d;

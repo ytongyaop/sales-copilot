@@ -16,8 +16,10 @@ from salescopilot.adapters.db.sqlite import (
     SqliteStageEventRepository,
     default_db_path,
 )
+from salescopilot.adapters.llm.deepseek import DeepSeekExtractor
 from salescopilot.adapters.llm.fake import FakeExtractor
 from salescopilot.adapters.template.loader import TemplateError, load_all
+from salescopilot.config import ConfigError, Settings, load_settings, require_chat_key
 from salescopilot.domain.ports import (
     ExtractRunRepository,
     FactExtractor,
@@ -82,15 +84,38 @@ def build_followup_service() -> FollowupService:
     return FollowupService(leads, followups)
 
 
-def build_ingest_service() -> IngestService:
-    """采集与提炼用例：四条仓储 + 提炼器。
+def build_extractor(live: bool = False) -> FactExtractor:
+    """决定这次用假模型还是真模型：默认假模型，`live=True` 且配置齐才换真模型。
 
-    提炼器现在注入 `FakeExtractor`；B5b 换真模型只改这一行，用例与路由不动。
+    配置不齐时退回假模型而不是启动失败——账本里的 `model` 字段会写明到底是哪个，
+    评测脚本则走 `build_live_extractor()`，那里缺 key 会直接报错（基线不能拿假模型冒充）。
+    """
+    if not live:
+        return FakeExtractor()
+    try:
+        return build_live_extractor()
+    except ConfigError:
+        return FakeExtractor()
+
+
+def build_live_extractor() -> DeepSeekExtractor:
+    """真模型提炼器：`load_settings()` 只在这条路径上调用，缺 key 抛中文 `ConfigError`。"""
+    settings: Settings = load_settings()
+    return DeepSeekExtractor(
+        api_key=require_chat_key(settings),
+        model=settings.chat_model,
+    )
+
+
+def build_ingest_service(live: bool = False) -> IngestService:
+    """采集与提炼用例：四条仓储 + 提炼器（`live=True` 才可能接真模型）。
+
+    提炼器由 `build_extractor` 决定；换成真模型时用例与路由一行都不用改。
     """
     db = default_db_path()
     leads: LeadRepository = SqliteLeadRepository(db)
     raws: RawItemRepository = SqliteRawItemRepository(db)
     facts: FactRepository = SqliteFactRepository(db)
     runs: ExtractRunRepository = SqliteExtractRunRepository(db)
-    extractor: FactExtractor = FakeExtractor()
+    extractor: FactExtractor = build_extractor(live)
     return IngestService(leads, raws, facts, runs, extractor)

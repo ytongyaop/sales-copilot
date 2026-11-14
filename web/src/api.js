@@ -65,4 +65,23 @@ export function createFollowup(leadId, payload) {
   return request(`/leads/${leadId}/followups`, jsonOptions('POST', payload))
 }
 
+// ---------------------------------------------------------------- 原文 / 事实
+
+export function createRaw(leadId, payload) {
+  return request(`/leads/${leadId}/raws`, jsonOptions('POST', payload))
+}
+
+export function extractRaw(rawId) {
+  return request(`/raws/${rawId}/extract`, { method: 'POST' })
+}
+
+export function listFacts(leadId) {
+  return request(`/leads/${leadId}/facts`)
+}
+
+// 人工写字段：后端是 upsert（没有就建、有就改并锁定），前端不复制这套规则。
+export function patchFact(leadId, field, value) {
+  return request(`/leads/${leadId}/facts/${encodeURIComponent(field)}`, jsonOptions('PATCH', { value }))
+}
+
 export { OFFLINE_MESSAGE }

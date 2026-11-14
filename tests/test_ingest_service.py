@@ -207,7 +207,7 @@ def test_ingest_unknown_lead_and_unknown_raw(tmp_path: Path) -> None:
     assert outcome.run is None
 
 
-def test_manual_edit_rejects_unknown_field_and_missing_fact(tmp_path: Path) -> None:
+def test_manual_edit_rejects_unknown_field(tmp_path: Path) -> None:
     service = _service(tmp_path)
     raw_id = _ingest(service)
     service.extract(raw_id)
@@ -216,10 +216,26 @@ def test_manual_edit_rejects_unknown_field_and_missing_fact(tmp_path: Path) -> N
     assert fact is None
     assert issues[0].location == "field"
 
+
+def test_set_manual_creates_fact_when_missing(tmp_path: Path) -> None:
+    """补录：该字段还没有事实时创建一条，来源人工、片段占位、置信度 1、已锁定。"""
+    service = _service(tmp_path)
+
     fact, issues = service.set_manual("lead-1", "amount", "2000 元")
-    assert fact is None
-    assert issues[0].location == "fact"
-    assert "amount" in issues[0].message
+
+    assert issues == []
+    assert fact is not None
+    assert fact.field == "amount"
+    assert fact.value == "2000 元"
+    assert fact.source == "manual"
+    assert fact.source_span == "(人工录入)"
+    assert fact.confidence == 1.0
+    assert fact.locked is True
+    assert fact.raw_id == ""
+
+    listed = service.list_facts("lead-1")[0]
+    assert [item.field for item in listed] == ["amount"]
+    assert listed[0].locked is True
 
 
 def test_unlock_keeps_manual_source(tmp_path: Path) -> None:

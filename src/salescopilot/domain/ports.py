@@ -6,6 +6,7 @@
 from typing import Protocol
 
 from salescopilot.domain.models import (
+    ExtractionResult,
     ExtractRun,
     Fact,
     Followup,
@@ -76,10 +77,12 @@ class ExtractRunRepository(Protocol):
 
 
 class FactExtractor(Protocol):
-    """提炼器端口：只知道「原文 + 已有事实」，返回候选列表。
+    """提炼器端口：只知道「原文 + 已有事实」，返回候选与这次产出的证据。
 
-    返回的每项形如 `{"field", "value", "source_span", "confidence"}`；
+    `ExtractionResult.candidates` 的每项形如 `{"field", "value", "source_span", "confidence"}`；
     候选是否合规、是否落库由 `domain/facts.py` 与用例层判定，提炼器不做取舍。
+    `token` / `seconds` / `raw_output_hash` 由实现自行测量（假模型给确定性的 0）。
+    失败（网络、超时、输出解析不了）一律抛 `domain/errors.py` 的 `ExtractError`。
     """
 
-    def extract(self, *, raw: RawItem, facts: list[Fact]) -> list[dict]: ...
+    def extract(self, *, raw: RawItem, facts: list[Fact]) -> ExtractionResult: ...

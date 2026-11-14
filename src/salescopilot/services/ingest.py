@@ -11,11 +11,11 @@
 """
 
 import hashlib
-import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from salescopilot.domain.errors import ExtractError
 from salescopilot.domain.facts import (
     ALLOWED_FACT_FIELDS,
     MAX_FACT_VALUE_LEN,
@@ -35,6 +35,9 @@ from salescopilot.services.leads import utc_now_iso
 
 # 一段素材少于这个字数就没有提炼价值（也为「脏输入」留一个统一口径）。
 MIN_CONTENT_LEN = 10
+
+# 人工补录的字段没有原文出处，用这个固定标记占位（前端据来源徽标区分 AI / 人工）。
+MANUAL_SOURCE_SPAN = "(人工录入)"
 
 
 @dataclass(frozen=True)
@@ -59,7 +62,6 @@ class IngestService:
         runs: ExtractRunRepository,
         extractor: FactExtractor,
         clock: Callable[[], str] | None = None,
-        prompt_version: str = "v0",
     ) -> None:
         self._leads = leads
         self._raws = raws
@@ -67,7 +69,6 @@ class IngestService:
         self._runs = runs
         self._extractor = extractor
         self._clock = clock if clock is not None else utc_now_iso
-        self._prompt_version = prompt_version
 
     # ------------------------------------------------------------------ 采集
 
@@ -127,7 +128,13 @@ class IngestService:
             )
 
         context = self._facts.list_for(raw.lead_id)
-        candidates = self._extractor.extract(raw=raw, facts=context)
+        try:
+            result = self._extractor.extract(raw=raw, facts=context)
+        except ExtractError as exc:
+            # 模型侧的失败（网络/超时/解析不了）翻译成一条问题返回，不让接口抛 500。
+            return ExtractOutcome(False, [ValidationIssue("extractor", str(exc))], [], [], None)
+
+        candidates = result.candidates
         passed, problems = validate_candidates_indexed(candidates)
 
         accepted: list[Fact] = []
@@ -153,15 +160,15 @@ class IngestService:
         run = ExtractRun(
             id=str(uuid.uuid4()),
             raw_id=raw_id,
-            model=self._model_name(),
-            prompt_version=self._prompt_version,
+            model=result.model,
+            prompt_version=result.prompt_version,
             input_hash=raw.content_hash,
-            output_hash=_hash_payload(candidates),
+            output_hash=result.raw_output_hash,
             candidates=len(candidates),
             accepted=len(accepted),
             skipped=len(skipped),
-            token=0,
-            seconds=0.0,
+            token=result.token,
+            seconds=result.seconds,
             at=now,
         )
         self._runs.add(run)
@@ -181,11 +188,19 @@ class IngestService:
     def set_manual(
         self, lead_id: str, field: str, value: str
     ) -> tuple[Fact | None, list[ValidationIssue]]:
-        """人工改一个字段：来源记成 `manual` 并锁定，后续提炼不再覆盖它。"""
-        resolved = self._resolve_existing(lead_id, field)
-        if isinstance(resolved, list):
-            return None, resolved
-        existing = resolved
+        """人工写一个字段：有就改、没有就建（upsert），一律记 `manual` 并锁定。
+
+        补录也要能成：客户刚说了一句没跑过提炼的话，销售直接填进去，后续提炼不得覆盖。
+        """
+        if self._leads.get(lead_id) is None:
+            return None, [ValidationIssue("lead_id", "线索不存在")]
+
+        field_text = field.strip() if isinstance(field, str) else ""
+        if field_text not in ALLOWED_FACT_FIELDS:
+            allowed = "、".join(ALLOWED_FACT_FIELDS)
+            return None, [
+                ValidationIssue("field", f"字段必须是以下之一：{allowed}（实际是 {field_text}）")
+            ]
 
         text = value.strip() if isinstance(value, str) else ""
         if not text:
@@ -196,6 +211,23 @@ class IngestService:
                     "value", f"取值不能超过 {MAX_FACT_VALUE_LEN} 个字符（实际 {len(text)}）"
                 )
             ]
+
+        existing = self._facts.get_by_field(lead_id, field_text)
+        if existing is None:
+            created = Fact(
+                id=str(uuid.uuid4()),
+                lead_id=lead_id,
+                raw_id="",
+                field=field_text,
+                value=text,
+                source="manual",
+                source_span=MANUAL_SOURCE_SPAN,
+                confidence=1.0,
+                locked=True,
+                at=self._clock(),
+            )
+            self._facts.add(created)
+            return created, []
 
         fact = replace(
             existing,
@@ -235,16 +267,6 @@ class IngestService:
             return [ValidationIssue("fact", f"该线索还没有「{field_text}」这条事实")]
         return existing
 
-    def _model_name(self) -> str:
-        """模型名写进账本：假模型自带 `name`，真模型同样要带一个。"""
-        return getattr(self._extractor, "name", type(self._extractor).__name__)
-
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _hash_payload(payload: list[dict]) -> str:
-    """把模型输出压成一个稳定哈希：键排序 + 不转义中文，同输出必同哈希。"""
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return _sha256(canonical)

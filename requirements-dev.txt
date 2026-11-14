@@ -1,10 +1,12 @@
 # 开发依赖 — 由 `pip freeze` 全量导出
-# 生成日期：2026-11-13
+# 生成日期：2026-11-14（B5b：新增 openai / python-dotenv）
 # 环境：Python 3.14.6 / Windows / venv 位于 .venv
 # 安装源：https://mirrors.aliyun.com/pypi/simple/
 # 说明：httpx2 / httpcore2 是 starlette 1.10 的 TestClient 依赖（fastapi.testclient 需要它们），
-#       不是业务依赖，只是为了让 tests/test_smoke.py 能跑。
-# 无重型依赖：不含 chromadb / openai / streamlit（B2 之后按需加）。
+#       同时也是 openai 3.x 的 HTTP 客户端（该版本依赖 httpx2，不装真正的 httpx）。
+#       openai / python-dotenv 只走 B5b 的真模型提炼：SDK 只允许出现在 adapters/，
+#       domain / services 一律不 import（见 .importlinter 与 tests/test_no_industry_words.py）。
+#       仍不含 chromadb / streamlit（按后续增量再加）。
 
 annotated-doc==0.0.6
 annotated-types==0.8.0
@@ -19,8 +21,10 @@ httpx2==2.16.0
 idna==3.20
 import-linter==2.16
 iniconfig==2.3.1
+jiter==0.19.0
 markdown-it-py==4.3.0
 mdurl==0.1.2
+openai==3.51.0
 opentelemetry-api==1.45.2
 packaging==26.3
 pluggy==1.7.0
@@ -28,9 +32,11 @@ pydantic==2.14.3
 pydantic_core==2.50.4
 Pygments==2.21.0
 pytest==9.2.0
+python-dotenv==1.2.4
 PyYAML==6.0.3
 rich==15.0.0
 ruff==0.17.5
+sniffio==1.3.1
 starlette==1.10.0
 truststore==0.10.5
 typing-inspection==0.4.5

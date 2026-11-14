@@ -1,0 +1,20 @@
+{"id":"e01","content":"我看了下你们这个方案，比我现在用的贵了将近一半，同样的东西别家能做到八折，你们这个价格实在有点高，我得再想想。","expected":[{"field":"objection","value":"price"}]}
+{"id":"e02","content":"这个方案的价格我看了，比预期高出不少，不便宜，我预算就那么点，超太多我这边批不下来，你们能不能再给个实惠的选择。","expected":[{"field":"objection","value":"price"}]}
+{"id":"e03","content":"价格这块我最在意，你给的总价有点贵，同样的服务我在别处问过，便宜两三千，你们要先降下来我才好往下谈。","expected":[{"field":"objection","value":"price"}]}
+{"id":"e04","content":"最近店里实在太忙了，天天加班到十点，你们说的那套东西我一时半会儿抽不出时间了解，等我这段忙完再说吧。","expected":[{"field":"objection","value":"time"}]}
+{"id":"e05","content":"我这周和下周都排满了，白天要跑客户，晚上还要带团队，实在没空坐下来聊，时间上真的对不上。","expected":[{"field":"objection","value":"time"}]}
+{"id":"e06","content":"说实话时间不太合适，孩子刚开学事情多，光是接送就占掉半天，哪有功夫研究你们这个系统。","expected":[{"field":"objection","value":"time"}]}
+{"id":"e07","content":"东西看着是不错，但我担心用起来效果不明显，之前也上过一套，说是能提升转化，最后就那么放着没人用。","expected":[{"field":"objection","value":"effect"}]}
+{"id":"e08","content":"我最怕的是花了钱看不到效果，你们说能提高效率，可我们这种小团队到底能提升多少，心里真没底。","expected":[{"field":"objection","value":"effect"}]}
+{"id":"e09","content":"效果这块我打个问号，万一员工不愿意用，数据不准，最后还是一堆烂账，那这钱就白花了。","expected":[{"field":"objection","value":"effect"}]}
+{"id":"e10","content":"你们这个我知道得不多，网上也没怎么见过，说实话我有点不太信，现在打着这个旗号的太多了，我怕交了钱人就找不到了。","expected":[{"field":"objection","value":"trust"}]}
+{"id":"e11","content":"先别急着谈合作，我对你们公司不太了解，连个正经案例都没看到，信任这东西得慢慢建立，你让我怎么放心把钱交出去。","expected":[{"field":"objection","value":"trust"}]}
+{"id":"e12","content":"我怕被骗，之前有个同行就被这种上门推销的坑过一次，钱付了东西没影了，所以我对你们还是有点怀疑。","expected":[{"field":"objection","value":"trust"}]}
+{"id":"e13","content":"这事我一个人定不了，得跟我合伙人再商量商量，他最近在外地出差，等他回来我们把账算清楚才能给你答复。","expected":[{"field":"objection","value":"other"}]}
+{"id":"e14","content":"还有个问题，我们用的是另一家的系统，数据都在那边，换过来迁移的麻烦谁负责，这个不解决我没法推进。","expected":[{"field":"objection","value":"other"}]}
+{"id":"e15","content":"我这边还在观望，同类型的产品太多了，想再对比两家看看，不着急定，你们先不用催我。","expected":[{"field":"objection","value":"other"}]}
+{"id":"e16","content":"这事最后是王校长拍板，我只是负责对接，具体流程得他点头；他人不在这边，下周一上午才能回来，到时候一起谈。","expected":[{"field":"decision_maker","value":"王校长"},{"field":"appointment_at","value":"下周一"}]}
+{"id":"e17","content":"我们老板不出面，采购这块是李主任说了算，她说行才能往下走；约的是明天下午三点，她应该有空。","expected":[{"field":"decision_maker","value":"李主任"},{"field":"appointment_at","value":"明天下午三点"}]}
+{"id":"e18","content":"合同这块归张总签，我提了也没用；时间我跟他约的下周二上午十点，你要是能来就直接过来。","expected":[{"field":"decision_maker","value":"张总"},{"field":"appointment_at","value":"下周二上午十点"}]}
+{"id":"e19","content":"我们一年大概能投 2000 元，超过 3000 元我就不谈了，你按这个区间给我方案。","expected":[{"field":"amount","value":"2000元"}]}
+{"id":"e20","content":"预算我算过，一年 1.5 万上下，这个数是我自己能拍板的，再多就得回去开会讨论，你按这个准备。","expected":[{"field":"amount","value":"1.5万"}]}

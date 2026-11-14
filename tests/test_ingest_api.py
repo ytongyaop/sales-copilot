@@ -75,7 +75,7 @@ def test_extract_returns_accepted_skipped_and_run(client: TestClient) -> None:
         assert fact["source"] == "llm"
         assert fact["locked"] is False
     assert body["skipped"] == []
-    assert body["run"]["model"] == "fake-v0"
+    assert body["run"]["model"] == "fake"
     assert body["run"]["candidates"] == 3
     assert body["run"]["accepted"] == 3
 
@@ -129,7 +129,7 @@ def test_get_facts_ascending_and_patch_locks(client: TestClient) -> None:
     assert objection["value"] == "effect"
 
 
-def test_patch_rejects_bad_field_and_missing_fact(client: TestClient) -> None:
+def test_patch_rejects_bad_field(client: TestClient) -> None:
     lead_id = _lead_id(client)
     raw_id = _raw_id(client, lead_id)
     client.post(f"/raws/{raw_id}/extract")
@@ -138,9 +138,25 @@ def test_patch_rejects_bad_field_and_missing_fact(client: TestClient) -> None:
     assert bad_field.status_code == 422
     assert bad_field.json()["issues"][0]["location"] == "field"
 
-    missing_fact = client.patch(f"/leads/{lead_id}/facts/amount", json={"value": "2000 元"})
-    assert missing_fact.status_code == 404
-    assert missing_fact.json()["issues"][0]["location"] == "fact"
+
+def test_patch_never_extracted_field_creates_locked_fact(client: TestClient) -> None:
+    """从未提炼过的字段也能补录：PATCH 走 upsert，来源人工、片段占位、已锁定。"""
+    lead_id = _lead_id(client)
+
+    created = client.patch(f"/leads/{lead_id}/facts/amount", json={"value": "2000 元"})
+
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["field"] == "amount"
+    assert body["value"] == "2000 元"
+    assert body["source"] == "manual"
+    assert body["source_span"] == "(人工录入)"
+    assert body["confidence"] == 1.0
+    assert body["locked"] is True
+
+    after = client.get(f"/leads/{lead_id}/facts").json()
+    assert [fact["field"] for fact in after] == ["amount"]
+    assert after[0]["locked"] is True
 
 
 def test_delete_lock_unlocks_but_keeps_manual_source(client: TestClient) -> None:
