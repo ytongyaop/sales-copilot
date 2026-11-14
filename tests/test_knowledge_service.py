@@ -31,13 +31,13 @@ def test_build_counts_chunks_and_writes_manifest(tmp_path: Path) -> None:
 
     count, warnings = service.build(DOCS)
 
-    assert count == 4  # 两份资料各 2 块（标题 1 + 正文 1）
+    assert count == 2  # 两份资料各 1 块（标题与其后正文合并，不再单独出标题块）
     assert warnings == []
-    assert service.count() == 4
+    assert service.count() == 2
     manifest = read_manifest(manifest_path_of(tmp_path / "index"))
     assert manifest == {
         "embed_model": "fake",
-        "chunk_count": 4,
+        "chunk_count": 2,
         "built_at": "2026-11-14T10:00:00+00:00",
     }
 
@@ -47,8 +47,8 @@ def test_build_is_rebuild_not_append(tmp_path: Path) -> None:
     service.build(DOCS)
     count, _ = service.build(DOCS)
 
-    assert count == 4
-    assert service.count() == 4, "重复建索引必须是整份重建，不能累加"
+    assert count == 2
+    assert service.count() == 2, "重复建索引必须是整份重建，不能累加"
 
 
 def test_search_empty_store_returns_empty(tmp_path: Path) -> None:

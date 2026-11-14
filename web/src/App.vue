@@ -9,6 +9,7 @@ import {
   createRaw,
   discardDraft,
   extractRaw,
+  getHealth,
   listFacts,
   listFollowups,
   listLeads,
@@ -41,6 +42,21 @@ const leads = ref([])
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
+
+// 后端 /health 给的运行模式：真心模型还是假模型，必须在顶部一眼看出来——
+// 假模型（演示数据不可信）的草稿与事实不能当成真实结论。
+const health = ref(null)
+
+function modeLabel() {
+  return health.value && health.value.mode === 'live'
+    ? '模式：真模型'
+    : '模式：假模型（演示数据不可信）'
+}
+
+function modeTitle() {
+  const models = health.value && health.value.models
+  return models ? `对话模型：${models.chat}；向量模型：${models.embed}` : ''
+}
 
 // 事实字段的中文名：只影响显示，字段名本身是机器契约（与后端 ALLOWED_FACT_FIELDS 对齐）。
 const FACT_FIELDS = [
@@ -160,6 +176,15 @@ async function loadTemplates() {
     templates.value = await listTemplates()
   } catch (err) {
     error.value = err.message
+  }
+}
+
+// 模式徽标拿不到不影响主流程：静默留空，别抢掉「服务未连接」这类真实错误的位置。
+async function loadHealth() {
+  try {
+    health.value = await getHealth()
+  } catch {
+    health.value = null
   }
 }
 
@@ -395,6 +420,7 @@ function clearDraft(leadId) {
 }
 
 onMounted(async () => {
+  await loadHealth()
   await loadTemplates()
   await load()
 })
@@ -402,7 +428,17 @@ onMounted(async () => {
 
 <template>
   <main class="page">
-    <h1>线索</h1>
+    <header class="top">
+      <h1>线索</h1>
+      <span
+        v-if="health"
+        class="mode"
+        :class="health.mode === 'live' ? 'live' : 'fake'"
+        :title="modeTitle()"
+      >
+        {{ modeLabel() }}
+      </span>
+    </header>
 
     <section class="card">
       <h2>新增线索</h2>
@@ -717,6 +753,33 @@ onMounted(async () => {
 h1 {
   font-size: 24px;
   margin: 0 0 16px;
+}
+.top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.top h1 {
+  margin: 0;
+}
+.mode {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  border: 1px solid transparent;
+}
+.mode.live {
+  background: #e7f6ec;
+  border-color: #b7e2c4;
+  color: #17663a;
+}
+.mode.fake {
+  background: #fff4d6;
+  border-color: #f0d896;
+  color: #7a5b00;
 }
 h2 {
   font-size: 16px;

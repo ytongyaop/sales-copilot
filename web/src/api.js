@@ -45,6 +45,11 @@ export function listLeads() {
   return request('/leads')
 }
 
+// 运行模式：演示前先确认后端是真模型还是假模型（假模型的数据不能当真实结论）。
+export function getHealth() {
+  return request('/health')
+}
+
 export function createLead(payload) {
   return request('/leads', jsonOptions('POST', payload))
 }

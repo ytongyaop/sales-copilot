@@ -36,6 +36,23 @@ $env:PYTHONPATH='src'; .venv\Scripts\python.exe -m uvicorn salescopilot.entrypoi
 > 坑一：`src/` 布局必须让 Python 找得到包——pytest 已在 `pyproject.toml` 里配了 `pythonpath=["src"]`，跑 `uvicorn` / `lint-imports` 时则要手动设 `$env:PYTHONPATH='src'`。
 > 坑二：`.importlinter` 必须**纯 ASCII**——import-linter 在 Windows 下按系统编码读配置，写中文会报 codec 错。
 
+## 两种模式
+
+**默认假模型**：不联网、不花钱，自动化测试与离线演示都用它。`GET /health` 返回
+`"mode": "fake"`，前端顶部显示「模式：假模型（演示数据不可信）」——假模型的草稿和事实不能当真实结论。
+
+**真模型**：话术走 DeepSeek、向量走 DashScope，需要项目根 `.env` 里的
+`DEEPSEEK_API_KEY` 与 `DASHSCOPE_API_KEY`；缺任何一个都**启动失败并打印中文提示**，不会悄悄退回假模型。
+
+```powershell
+$env:SALESCOPILOT_LIVE='1'
+$env:PYTHONPATH='src'
+.venv\Scripts\python.exe -m uvicorn salescopilot.entrypoints.api.app:app --port 8000
+```
+
+启动后 `GET /health` 会返回 `"mode": "live"` 与当前模型名（`models.chat` / `models.embed`），
+前端顶部显示「模式：真模型」。
+
 ## 目录说明
 
 ```

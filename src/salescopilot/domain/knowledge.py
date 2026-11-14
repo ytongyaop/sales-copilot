@@ -6,18 +6,24 @@
 
 排法（三步）：
 1. 先按 Markdown 标题切段（`#` 到 `######` 开头的行）；
-2. 段内再按空行切块；
-3. 单块仍超过 `max_chars` 时，按句号/问号/感叹号/分号/换行切，超过 `overlap`
-   时把上一块末尾的若干字符带进下一块，避免一句话被切两半后两个块都读不懂。
+2. 段内再按空行切块；**标题行不单独成块**——它是块的起始标记，和紧随其后的正文合并，
+   块文本里保留标题（例如「`## 一、章节名`」+ 正文），检索时标题与内容才不会互相脱节；
+3. 单块仍超过 `max_chars` 时，优先在换行处断开（一行内容不切在中间），其次句末标点；
+   超过 `overlap` 时把上一块末尾的若干字符带进下一块，避免一句话被切两半后两块都读不懂。
+   列表项被切开时，块首尾悬空的纯符号（`-` / `*` 之类）一律回推掉，不留下孤立标记。
 """
 
 import re
 from dataclasses import dataclass
 
 # 句末标点：切超长块时只在这些位置断开（宁可块短一点，也不要在词中间切）。
-_SENTENCE_ENDS = "。！？!?；;\n"
+_SENTENCE_ENDS = "。！？!?；;"
 # 标题行：最多六级；`\S` 保证「#空格#」这种不是标题。
 _HEADING = re.compile(r"^#{1,6}\s+\S")
+# 块首尾可能残留的「纯符号」：列表项被切开后留下的孤立标记。
+_EDGE_SYMBOLS = "-*+·•◦"
+# 列表标记只认行首的「- 」/「* 」（后面必须跟空白，避免把「**加粗**」的星号当标记）。
+_LIST_MARKS = "-*"
 
 # 索引清单的键：写在 domain，适配器与用例层各读各写同一份约定，避免格式漂移。
 MANIFEST_KEYS: tuple[str, ...] = ("embed_model", "chunk_count", "built_at")
@@ -86,7 +92,11 @@ def _sections(text: str) -> list[tuple[int, int]]:
 
 
 def _blocks(text: str, start: int, end: int) -> list[tuple[int, int]]:
-    """段内按空行切块：连续的非空行算一块，空行是分隔符（不进块）。"""
+    """段内按空行切块：连续的非空行算一块，空行是分隔符（不进块）。
+
+    切完再把「只有一行标题」的块并进它后面的正文：标题单独成块时既没有信息量，
+    又会让正文失去归属，检索出来的引用像半句话。
+    """
     blocks: list[tuple[int, int]] = []
     offset = start
     block_start: int | None = None
@@ -104,28 +114,72 @@ def _blocks(text: str, start: int, end: int) -> list[tuple[int, int]]:
 
     if block_start is not None:
         blocks.append((block_start, end))
-    return blocks
+    return _merge_titles(blocks, text)
+
+
+def _merge_titles(blocks: list[tuple[int, int]], text: str) -> list[tuple[int, int]]:
+    """把「单行标题」块与其后一块合并（合并区间中间的空白原样保留，偏移仍指向原文）。"""
+    merged: list[tuple[int, int]] = []
+    index = 0
+    while index < len(blocks):
+        block_start, block_end = blocks[index]
+        following = blocks[index + 1] if index + 1 < len(blocks) else None
+        if following is not None and _is_title_line(text, block_start, block_end):
+            merged.append((block_start, following[1]))
+            index += 2
+            continue
+        merged.append((block_start, block_end))
+        index += 1
+    return merged
+
+
+def _is_title_line(text: str, start: int, end: int) -> bool:
+    """这个块是不是「只有一行 Markdown 标题」；是的话它应该当下一块的起始标记。"""
+    span = text[start:end].rstrip()
+    return "\n" not in span and bool(_HEADING.match(span))
 
 
 def _trim(text: str, start: int, end: int) -> tuple[int, int] | None:
-    """去掉首尾空白并回推偏移；去完为空返回 None（这种块直接丢）。"""
-    while start < end and text[start].isspace():
-        start += 1
-    while end > start and text[end - 1].isspace():
-        end -= 1
+    """去掉首尾空白与悬空的纯符号残片并回推偏移；去完为空返回 None（这种块直接丢）。
+
+    只回推偏移、不改文本，所以 `text` 仍逐字等于 `原文[start:end]`，引用照样能回溯。
+    """
+    start = _skip_leading(text, start, end)
+    end = _skip_trailing(text, start, end)
     if start >= end:
         return None
     return start, end
 
 
+def _skip_leading(text: str, start: int, end: int) -> int:
+    while start < end and text[start].isspace():
+        start += 1
+    # 列表项被切开后，块首可能只剩「- 」/「* 」这种孤立标记：连同标记一起去掉。
+    if start + 1 < end and text[start] in _LIST_MARKS and text[start + 1].isspace():
+        start += 1
+        while start < end and text[start].isspace():
+            start += 1
+    return start
+
+
+def _skip_trailing(text: str, start: int, end: int) -> int:
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    # 行尾悬空的纯符号（最多两个）不是内容：砍掉后引用片段读起来仍是完整的一句。
+    cut = end
+    while cut > start and end - cut < 2 and text[cut - 1] in _EDGE_SYMBOLS:
+        cut -= 1
+    return cut
+
+
 def _pack(text: str, start: int, end: int, limit: int, overlap: int) -> list[tuple[int, int]]:
-    """把一块超长文本按句末标点打包成若干 ≤ limit 的片段。"""
+    """把一块超长文本打包成若干 ≤ limit 的片段（优先按换行断，其次句末标点）。"""
     pieces: list[tuple[int, int]] = []
     pos = start
     while pos < end:
         piece_end = min(pos + limit, end)
         if piece_end < end:
-            cut = _last_sentence_end(text, pos, piece_end)
+            cut = _cut_point(text, pos, piece_end)
             if cut > pos:
                 piece_end = cut
         trimmed = _trim(text, pos, piece_end)
@@ -135,6 +189,14 @@ def _pack(text: str, start: int, end: int, limit: int, overlap: int) -> list[tup
             break
         pos = max(piece_end - overlap, pos + 1)
     return pieces
+
+
+def _cut_point(text: str, start: int, limit_end: int) -> int:
+    """这一段该断在哪：优先最后一个换行（不切在一行中间），其次句末标点；都没有就不切。"""
+    newline = text.rfind("\n", start, limit_end)
+    if newline > start:
+        return newline + 1
+    return _last_sentence_end(text, start, limit_end)
 
 
 def _last_sentence_end(text: str, start: int, limit_end: int) -> int:

@@ -31,6 +31,8 @@ from salescopilot.entrypoints.bootstrap import (
     build_followup_service,
     build_ingest_service,
     build_lead_service,
+    check_live_config,
+    mode_info,
     templates,
 )
 from salescopilot.services.draft import DraftService
@@ -40,6 +42,10 @@ from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
+
+# 启动自检：开了真模型却缺 key 就在这里抛 ConfigError（并打印中文提示），
+# 不让进程「看起来起来了、实际悄悄用假模型」。
+check_live_config()
 
 # pydantic 层校验失败时，把字段名翻译成业务语言（不含行业词，只有通用字段）。
 FIELD_LABELS = {
@@ -236,9 +242,14 @@ async def _request_validation_handler(
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    """健康检查：只回答进程是否活着，不含任何业务判断。"""
-    return {"status": "ok"}
+def health() -> dict:
+    """健康检查：进程是否活着 + 当前是真模型还是假模型（演示时一眼能看出）。"""
+    info = mode_info()
+    return {
+        "status": "ok",
+        "mode": info["mode"],
+        "models": {"chat": info["chat"], "embed": info["embed"]},
+    }
 
 
 def _template_body(key: str, data: dict) -> dict:

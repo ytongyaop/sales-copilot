@@ -1,4 +1,4 @@
-"""切块规则的行为测试：偏移、超长切分、标题分段、空块丢弃。
+"""切块规则的行为测试：偏移、超长切分、标题与正文合并、列表残片、空块丢弃。
 
 切块的唯一价值是「每块都能指回原文」，所以每条断言都以
 `original[start:end] == chunk.text` 为底线，不只看块数。
@@ -11,16 +11,41 @@ from salescopilot.domain.knowledge import Chunk, chunk_markdown, is_citation_val
 LONG_BLOCK = "这是一句用来测试超长切分的普通话。" * 40  # 约 640 字，超过默认 500
 
 
-def test_heading_splits_sections() -> None:
+def test_heading_starts_block_and_merges_with_body() -> None:
+    """标题不单独成块：它作为块的起始标记，与其后的正文合并在同一块里。"""
     text = "# 第一节\n\n甲段落内容。\n\n# 第二节\n\n乙段落内容。\n"
     chunks = chunk_markdown(text)
 
-    titles = [chunk.text for chunk in chunks]
-    assert "# 第一节" in titles
-    assert "# 第二节" in titles
+    assert [chunk.text for chunk in chunks] == [
+        "# 第一节\n\n甲段落内容。",
+        "# 第二节\n\n乙段落内容。",
+    ]
+    # 每块都以标题开头、并带着标题下的正文（标题单独成块时这里会失败）。
+    for chunk in chunks:
+        assert chunk.text.startswith("# ")
+        assert "段落内容" in chunk.text
+        assert text[chunk.start : chunk.end] == chunk.text
     # 没有任何一块同时跨两个标题：跨了就说明标题切段没生效。
     for chunk in chunks:
         assert not ("# 第一节" in chunk.text and "# 第二节" in chunk.text)
+
+
+def test_list_items_leave_no_dangling_markers() -> None:
+    """列表项被切开时不能留下孤立的「-」或「*」：块首尾必须是真实内容。"""
+    text = "\n".join(
+        f"- 第{index}项内容，这一条写得比较长，用来让切分点落在列表项之间。"
+        for index in range(1, 12)
+    )
+    chunks = chunk_markdown(text, max_chars=40)
+
+    assert len(chunks) > 1, "这份列表必须真的被切开，否则测不到边界"
+    for chunk in chunks:
+        assert text[chunk.start : chunk.end] == chunk.text
+        assert is_citation_valid(chunk, text)
+        assert chunk.text.strip() == chunk.text
+        assert chunk.text not in {"-", "*", "- -", "* *"}
+        assert not chunk.text.endswith(("-", "*"))
+        assert not chunk.text.startswith(("- ", "* "))
 
 
 def test_blank_lines_split_blocks() -> None:
@@ -67,7 +92,10 @@ def test_empty_blocks_are_dropped() -> None:
     text = "\n\n\n   \n\n# 标题\n\n\n\n正文。\n\n   \n"
     chunks = chunk_markdown(text)
 
-    assert [chunk.text for chunk in chunks] == ["# 标题", "正文。"]
+    # 标题与其后正文合并成一块，中间的空白原样保留；只有空白行形不成块。
+    assert len(chunks) == 1
+    assert chunks[0].text.startswith("# 标题")
+    assert chunks[0].text.endswith("正文。")
     assert all(chunk.text.strip() for chunk in chunks)
 
 

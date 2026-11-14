@@ -108,22 +108,17 @@ def build_followup_service() -> FollowupService:
     return FollowupService(leads, followups)
 
 
-def build_extractor(live: bool = False) -> FactExtractor:
-    """决定这次用假模型还是真模型：默认假模型，`live=True` 且配置齐才换真模型。
+def build_extractor(live: bool | None = None) -> FactExtractor:
+    """决定这次用假模型还是真模型：默认跟随 `Settings.live`（默认假）。
 
-    配置不齐时退回假模型而不是启动失败——账本里的 `model` 字段会写明到底是哪个，
-    评测脚本则走 `build_live_extractor()`，那里缺 key 会直接报错（基线不能拿假模型冒充）。
+    显式 `live=True` 但配置不齐时**直接抛 `ConfigError`**，不在运行中悄悄退回假模型——
+    否则界面上的 `AI·fake` 很容易被当成「真模型跑过了」。
     """
-    if not live:
-        return FakeExtractor()
-    try:
-        return build_live_extractor()
-    except ConfigError:
-        return FakeExtractor()
+    return build_live_extractor() if _resolve_live(live) else FakeExtractor()
 
 
 def build_live_extractor() -> DeepSeekExtractor:
-    """真模型提炼器：`load_settings()` 只在这条路径上调用，缺 key 抛中文 `ConfigError`。"""
+    """真模型提炼器：缺 key 抛中文 `ConfigError`。"""
     settings: Settings = load_settings()
     return DeepSeekExtractor(
         api_key=require_chat_key(settings),
@@ -131,17 +126,18 @@ def build_live_extractor() -> DeepSeekExtractor:
     )
 
 
-def build_ingest_service(live: bool = False) -> IngestService:
-    """采集与提炼用例：四条仓储 + 提炼器（`live=True` 才可能接真模型）。
+def build_ingest_service(live: bool | None = None) -> IngestService:
+    """采集与提炼用例：四条仓储 + 提炼器（默认跟随 `Settings.live`）。
 
     提炼器由 `build_extractor` 决定；换成真模型时用例与路由一行都不用改。
     """
+    resolved = _resolve_live(live)
     db = default_db_path()
     leads: LeadRepository = SqliteLeadRepository(db)
     raws: RawItemRepository = SqliteRawItemRepository(db)
     facts: FactRepository = SqliteFactRepository(db)
     runs: ExtractRunRepository = SqliteExtractRunRepository(db)
-    extractor: FactExtractor = build_extractor(live)
+    extractor: FactExtractor = build_extractor(resolved)
     return IngestService(leads, raws, facts, runs, extractor)
 
 
@@ -156,13 +152,12 @@ def index_dir() -> Path:
     return DATA_DIR / "index"
 
 
-def build_embedder(live: bool = False) -> Embedder:
-    """默认假向量（不联网、不花钱）；`live=True` 才按配置接 DashScope 真向量。
+def build_embedder(live: bool | None = None) -> Embedder:
+    """默认假向量（不联网、不花钱）；默认跟随 `Settings.live`，开了才接 DashScope 真向量。
 
-    默认不做「有 key 就偷偷联网」：接口层的每次检索都会产生费用，
-    要真向量必须显式走 `live=True`（本增量只跑假的，真的一步未验）。
+    真向量缺 key 直接抛 `ConfigError`：静默退回假向量会让「引用的片段」和索引对不上。
     """
-    if not live:
+    if not _resolve_live(live):
         return FakeEmbedder()
     settings: Settings = load_settings()
     return DashScopeEmbedder(api_key=require_embed_key(settings), model=settings.embed_model)
@@ -173,7 +168,7 @@ def embed_model_name(embedder: Embedder) -> str:
     return getattr(embedder, "model", FAKE_EMBED_MODEL)
 
 
-def build_knowledge_service(live: bool = False) -> KnowledgeService:
+def build_knowledge_service(live: bool | None = None) -> KnowledgeService:
     """资料检索用例：向量化 + 向量库 + 清单路径 + 当前模型名（一致性校验用）。"""
     embedder = build_embedder(live)
     store: VectorStore = ChromaStore(index_dir())
@@ -185,22 +180,20 @@ def build_knowledge_service(live: bool = False) -> KnowledgeService:
     )
 
 
-def build_draft_generator(live: bool = False) -> DraftGenerator:
-    """话术生成器：默认假实现；`live=True` 且配置齐才换真模型，缺 key 退回假模型。"""
-    if not live:
+def build_draft_generator(live: bool | None = None) -> DraftGenerator:
+    """话术生成器：默认假实现；`live=True` 缺 key 直接抛 `ConfigError`，不静默退回。"""
+    if not _resolve_live(live):
         return FakeDrafter()
-    try:
-        settings: Settings = load_settings()
-        return DeepSeekDrafter(api_key=require_chat_key(settings), model=settings.chat_model)
-    except ConfigError:
-        return FakeDrafter()
+    settings: Settings = load_settings()
+    return DeepSeekDrafter(api_key=require_chat_key(settings), model=settings.chat_model)
 
 
-def build_draft_service(live: bool = False) -> DraftService:
+def build_draft_service(live: bool | None = None) -> DraftService:
     """话术用例：线索 + 事实 + 跟进 + 草稿仓储 + 资料检索 + 生成器。
 
-    `live=True` 时才接真向量与真模型；默认两步都是假的，接口不会产生任何外部调用。
+    真/假由同一个 `live` 决定（向量与生成器不会一半真一半假）；默认跟随 `Settings.live`。
     """
+    resolved = _resolve_live(live)
     db = default_db_path()
     leads: LeadRepository = SqliteLeadRepository(db)
     facts: FactRepository = SqliteFactRepository(db)
@@ -209,8 +202,36 @@ def build_draft_service(live: bool = False) -> DraftService:
     return DraftService(
         leads,
         facts,
-        build_knowledge_service(live),
-        build_draft_generator(live),
+        build_knowledge_service(resolved),
+        build_draft_generator(resolved),
         drafts,
         followups=followups,
     )
+
+
+def _resolve_live(live: bool | None) -> bool:
+    """没显式传就取配置里的开关；显式传 bool 时以传入为准（测试与脚本用）。"""
+    if live is None:
+        return load_settings().live
+    return bool(live)
+
+
+def check_live_config() -> None:
+    """启动前自检：开了真模型却缺 key，打印中文提示并抛 `ConfigError`（不静默降级）。"""
+    settings: Settings = load_settings()
+    if not settings.live:
+        return
+    try:
+        require_chat_key(settings)
+        require_embed_key(settings)
+    except ConfigError as exc:
+        print(f"[启动失败] SALESCOPILOT_LIVE=1，但配置不全：{exc}", flush=True)
+        raise
+
+
+def mode_info() -> dict[str, str]:
+    """当前运行模式与模型名，供 `GET /health` 展示；不返回任何密钥内容。"""
+    settings: Settings = load_settings()
+    if not settings.live:
+        return {"mode": "fake", "chat": "fake", "embed": "fake"}
+    return {"mode": "live", "chat": settings.chat_model, "embed": settings.embed_model}
