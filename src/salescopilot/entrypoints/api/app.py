@@ -15,16 +15,26 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from salescopilot.domain.labels import block_label
-from salescopilot.domain.models import DEFAULT_TEMPLATE, Followup, Lead, StageEvent
+from salescopilot.domain.models import (
+    DEFAULT_TEMPLATE,
+    ExtractRun,
+    Fact,
+    Followup,
+    Lead,
+    RawItem,
+    StageEvent,
+)
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.entrypoints.bootstrap import (
     build_flow_service,
     build_followup_service,
+    build_ingest_service,
     build_lead_service,
     templates,
 )
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
+from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
@@ -41,6 +51,8 @@ FIELD_LABELS = {
     "objection": "客户异议",
     "next_followup_at": "下次跟进时间",
     "lead_id": "线索",
+    "content": "内容",
+    "value": "取值",
 }
 
 
@@ -68,6 +80,19 @@ class FollowupIn(BaseModel):
     next_followup_at: str
 
 
+class RawIn(BaseModel):
+    """POST /leads/{id}/raws 的请求体：一段原文 + 来源。"""
+
+    content: str
+    source: str
+
+
+class FactPatchIn(BaseModel):
+    """PATCH /leads/{id}/facts/{field} 的请求体：只给新取值。"""
+
+    value: str
+
+
 def get_lead_service() -> Iterator[LeadService]:
     """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
 
@@ -84,9 +109,14 @@ def get_followup_service() -> Iterator[FollowupService]:
     yield build_followup_service()
 
 
+def get_ingest_service() -> Iterator[IngestService]:
+    yield build_ingest_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
+IngestDep = Annotated[IngestService, Depends(get_ingest_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -124,6 +154,49 @@ def _followup_body(item: Followup) -> dict:
         "objection": item.objection,
         "next_followup_at": item.next_followup_at,
         "at": item.at,
+    }
+
+
+def _raw_body(item: RawItem) -> dict:
+    return {
+        "id": item.id,
+        "lead_id": item.lead_id,
+        "source": item.source,
+        "content": item.content,
+        "content_hash": item.content_hash,
+        "at": item.at,
+    }
+
+
+def _fact_body(fact: Fact) -> dict:
+    return {
+        "id": fact.id,
+        "lead_id": fact.lead_id,
+        "raw_id": fact.raw_id,
+        "field": fact.field,
+        "value": fact.value,
+        "source": fact.source,
+        "source_span": fact.source_span,
+        "confidence": fact.confidence,
+        "locked": fact.locked,
+        "at": fact.at,
+    }
+
+
+def _run_body(run: ExtractRun) -> dict:
+    return {
+        "id": run.id,
+        "raw_id": run.raw_id,
+        "model": run.model,
+        "prompt_version": run.prompt_version,
+        "input_hash": run.input_hash,
+        "output_hash": run.output_hash,
+        "candidates": run.candidates,
+        "accepted": run.accepted,
+        "skipped": run.skipped,
+        "token": run.token,
+        "seconds": run.seconds,
+        "at": run.at,
     }
 
 
@@ -240,3 +313,76 @@ def create_followup(lead_id: str, payload: FollowupIn, service: FollowupDep):
 def list_followups(lead_id: str, service: FollowupDep) -> list[dict]:
     """该线索的跟进记录：按时间正序；没有记录返回 `[]`。"""
     return [_followup_body(item) for item in service.list_for(lead_id)]
+
+
+@app.post("/leads/{lead_id}/raws")
+def create_raw(lead_id: str, payload: RawIn, service: IngestDep):
+    """登记一段原文：新内容 201，同线索同内容 200 且原样返回已有那条。
+
+    两种情况都带 `duplicated` 标志，前端据此提示「这段已经录过了」。
+    """
+    item, duplicated, issues = service.ingest(
+        lead_id, content=payload.content, source=payload.source
+    )
+    if item is None:
+        missing_lead = any(issue.location == "lead_id" for issue in issues)
+        status = 404 if missing_lead else 422
+        return JSONResponse(status_code=status, content=_issue_body(issues))
+
+    status = 200 if duplicated else 201
+    return JSONResponse(status_code=status, content={**_raw_body(item), "duplicated": duplicated})
+
+
+@app.post("/raws/{raw_id}/extract")
+def extract_raw(raw_id: str, service: IngestDep):
+    """对一条原文跑提炼：返回采纳的事实、被丢弃的原因、以及这次运行的账。
+
+    素材不存在 404；重复提炼不报错，只是 `accepted` 为空（候选全命中「重复值」）。
+    """
+    outcome = service.extract(raw_id)
+    if not outcome.ok:
+        missing_raw = any(issue.location == "raw_id" for issue in outcome.issues)
+        status = 404 if missing_raw else 422
+        return JSONResponse(status_code=status, content=_issue_body(outcome.issues))
+
+    return {
+        "accepted": [_fact_body(fact) for fact in outcome.accepted],
+        "skipped": [
+            {"location": issue.location, "message": issue.message} for issue in outcome.skipped
+        ],
+        "run": None if outcome.run is None else _run_body(outcome.run),
+    }
+
+
+@app.get("/leads/{lead_id}/facts")
+def list_facts(lead_id: str, service: IngestDep):
+    """该线索的事实：按时间正序；线索不存在 404，没有事实返回 `[]`。"""
+    facts, issues = service.list_facts(lead_id)
+    if issues:
+        return JSONResponse(status_code=404, content=_issue_body(issues))
+    return [_fact_body(fact) for fact in facts]
+
+
+@app.patch("/leads/{lead_id}/facts/{field}")
+def patch_fact(lead_id: str, field: str, payload: FactPatchIn, service: IngestDep):
+    """人工改一个字段：来源记 manual 且锁定，后续提炼不再覆盖它。
+
+    字段非法或取值不合格 422；线索或该字段的事实不存在 404。
+    """
+    fact, issues = service.set_manual(lead_id, field, payload.value)
+    if fact is None:
+        missing = any(issue.location in ("lead_id", "fact") for issue in issues)
+        status = 404 if missing else 422
+        return JSONResponse(status_code=status, content=_issue_body(issues))
+    return _fact_body(fact)
+
+
+@app.delete("/leads/{lead_id}/facts/{field}/lock")
+def unlock_fact(lead_id: str, field: str, service: IngestDep):
+    """解除人工锁定：只把 locked 改回 false，来源仍记 manual。"""
+    fact, issues = service.unlock(lead_id, field)
+    if fact is None:
+        missing = any(issue.location in ("lead_id", "fact") for issue in issues)
+        status = 404 if missing else 422
+        return JSONResponse(status_code=status, content=_issue_body(issues))
+    return _fact_body(fact)

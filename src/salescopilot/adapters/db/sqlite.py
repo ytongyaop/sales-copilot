@@ -14,7 +14,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from salescopilot.domain.models import DEFAULT_TEMPLATE, Followup, Lead, StageEvent
+from salescopilot.domain.models import (
+    DEFAULT_TEMPLATE,
+    ExtractRun,
+    Fact,
+    Followup,
+    Lead,
+    RawItem,
+    StageEvent,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -43,6 +51,41 @@ CREATE TABLE IF NOT EXISTS followups (
     next_followup_at TEXT NOT NULL,
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS raw_items (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_raw_hash ON raw_items(lead_id, content_hash);
+CREATE TABLE IF NOT EXISTS facts (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    raw_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    value TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_span TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    locked INTEGER NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extract_runs (
+    id TEXT PRIMARY KEY,
+    raw_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    output_hash TEXT NOT NULL,
+    candidates INTEGER NOT NULL,
+    accepted INTEGER NOT NULL,
+    skipped INTEGER NOT NULL,
+    token INTEGER NOT NULL,
+    seconds REAL NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 _LEADS_COLUMNS = (
@@ -61,6 +104,15 @@ _SELECT_LEAD = (
 )
 _SELECT_EVENT = "SELECT id, lead_id, from_stage, to_stage, at FROM stage_history"
 _SELECT_FOLLOWUP = "SELECT id, lead_id, conclusion, objection, next_followup_at, at FROM followups"
+_SELECT_RAW = "SELECT id, lead_id, source, content, content_hash, at FROM raw_items"
+_SELECT_FACT = (
+    "SELECT id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at"
+    " FROM facts"
+)
+_SELECT_RUN = (
+    "SELECT id, raw_id, model, prompt_version, input_hash, output_hash, candidates,"
+    " accepted, skipped, token, seconds, at FROM extract_runs"
+)
 DB_PATH_ENV = "SALESCOPILOT_DB"
 
 
@@ -205,6 +257,189 @@ class SqliteFollowupRepository(_SqliteRepository):
                 conclusion=row["conclusion"],
                 objection=row["objection"],
                 next_followup_at=row["next_followup_at"],
+                at=row["at"],
+            )
+            for row in rows
+        ]
+
+
+class SqliteRawItemRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `RawItemRepository` 的 SQLite 实现。
+
+    `(lead_id, content_hash)` 上有唯一索引：同一线索的同一段内容只能有一条，
+    去重判断交给用例层（先查后写），索引只兜底防并发重复。
+    """
+
+    def add(self, item: RawItem) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO raw_items (id, lead_id, source, content, content_hash, at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    item.id,
+                    item.lead_id,
+                    item.source,
+                    item.content,
+                    item.content_hash,
+                    item.at,
+                ),
+            )
+
+    def get(self, raw_id: str) -> RawItem | None:
+        with self._open() as conn:
+            row = conn.execute(f"{_SELECT_RAW} WHERE id = ?", (raw_id,)).fetchone()
+        return None if row is None else self._to_raw(row)
+
+    def find_by_hash(self, lead_id: str, content_hash: str) -> RawItem | None:
+        with self._open() as conn:
+            row = conn.execute(
+                f"{_SELECT_RAW} WHERE lead_id = ? AND content_hash = ? "
+                "ORDER BY at ASC, rowid ASC LIMIT 1",
+                (lead_id, content_hash),
+            ).fetchone()
+        return None if row is None else self._to_raw(row)
+
+    def list_for(self, lead_id: str) -> list[RawItem]:
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_RAW} WHERE lead_id = ? ORDER BY at ASC, rowid ASC",
+                (lead_id,),
+            ).fetchall()
+        return [self._to_raw(row) for row in rows]
+
+    @staticmethod
+    def _to_raw(row: sqlite3.Row) -> RawItem:
+        return RawItem(
+            id=row["id"],
+            lead_id=row["lead_id"],
+            source=row["source"],
+            content=row["content"],
+            content_hash=row["content_hash"],
+            at=row["at"],
+        )
+
+
+class SqliteFactRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `FactRepository` 的 SQLite 实现。
+
+    一个字段只留一条事实：`get_by_field` 取最早写入的那条，`update` 按 id 原地改。
+    """
+
+    def add(self, fact: Fact) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO facts "
+                "(id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    fact.id,
+                    fact.lead_id,
+                    fact.raw_id,
+                    fact.field,
+                    fact.value,
+                    fact.source,
+                    fact.source_span,
+                    fact.confidence,
+                    1 if fact.locked else 0,
+                    fact.at,
+                ),
+            )
+
+    def list_for(self, lead_id: str) -> list[Fact]:
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_FACT} WHERE lead_id = ? ORDER BY at ASC, rowid ASC",
+                (lead_id,),
+            ).fetchall()
+        return [self._to_fact(row) for row in rows]
+
+    def get_by_field(self, lead_id: str, field: str) -> Fact | None:
+        with self._open() as conn:
+            row = conn.execute(
+                f"{_SELECT_FACT} WHERE lead_id = ? AND field = ? "
+                "ORDER BY at ASC, rowid ASC LIMIT 1",
+                (lead_id, field),
+            ).fetchone()
+        return None if row is None else self._to_fact(row)
+
+    def update(self, fact: Fact) -> None:
+        """整条改（值 / 来源 / 片段 / 置信度 / 锁定 / 时间）；按 id 定位。"""
+        with self._open() as conn:
+            conn.execute(
+                "UPDATE facts SET value = ?, source = ?, source_span = ?, confidence = ?, "
+                "locked = ?, at = ? WHERE id = ?",
+                (
+                    fact.value,
+                    fact.source,
+                    fact.source_span,
+                    fact.confidence,
+                    1 if fact.locked else 0,
+                    fact.at,
+                    fact.id,
+                ),
+            )
+
+    @staticmethod
+    def _to_fact(row: sqlite3.Row) -> Fact:
+        return Fact(
+            id=row["id"],
+            lead_id=row["lead_id"],
+            raw_id=row["raw_id"],
+            field=row["field"],
+            value=row["value"],
+            source=row["source"],
+            source_span=row["source_span"],
+            confidence=row["confidence"],
+            locked=bool(row["locked"]),
+            at=row["at"],
+        )
+
+
+class SqliteExtractRunRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `ExtractRunRepository` 的 SQLite 实现（只追加）。"""
+
+    def add(self, run: ExtractRun) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO extract_runs "
+                "(id, raw_id, model, prompt_version, input_hash, output_hash, candidates, "
+                "accepted, skipped, token, seconds, at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run.id,
+                    run.raw_id,
+                    run.model,
+                    run.prompt_version,
+                    run.input_hash,
+                    run.output_hash,
+                    run.candidates,
+                    run.accepted,
+                    run.skipped,
+                    run.token,
+                    run.seconds,
+                    run.at,
+                ),
+            )
+
+    def list_for_raw(self, raw_id: str) -> list[ExtractRun]:
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_RUN} WHERE raw_id = ? ORDER BY at ASC, rowid ASC",
+                (raw_id,),
+            ).fetchall()
+        return [
+            ExtractRun(
+                id=row["id"],
+                raw_id=row["raw_id"],
+                model=row["model"],
+                prompt_version=row["prompt_version"],
+                input_hash=row["input_hash"],
+                output_hash=row["output_hash"],
+                candidates=row["candidates"],
+                accepted=row["accepted"],
+                skipped=row["skipped"],
+                token=row["token"],
+                seconds=row["seconds"],
                 at=row["at"],
             )
             for row in rows

@@ -63,3 +63,54 @@ class Followup:
     objection: str
     next_followup_at: str
     at: str
+
+
+@dataclass(frozen=True)
+class RawItem:
+    """一条原始素材（消息/通话记录等）：只追加，`content_hash` 用于同线索去重。"""
+
+    id: str
+    lead_id: str
+    source: str
+    content: str
+    content_hash: str
+    at: str
+
+
+@dataclass(frozen=True)
+class Fact:
+    """一条已核实的事实。
+
+    - `source`：谁产出的——`llm`（模型提炼）、`manual`（人工改）、`rule`（规则推导）；
+    - `source_span`：原文片段，必须非空（无原文出处的候选不允许落库）；
+    - `locked`：人工锁定后，后续提炼一律跳过该字段。
+    """
+
+    id: str
+    lead_id: str
+    raw_id: str
+    field: str
+    value: str
+    source: str
+    source_span: str
+    confidence: float
+    locked: bool
+    at: str
+
+
+@dataclass(frozen=True)
+class ExtractRun:
+    """一次提炼的账本：哪个模型、哪版提示词、进出哈希、候选/采纳/丢弃计数与耗用。"""
+
+    id: str
+    raw_id: str
+    model: str
+    prompt_version: str
+    input_hash: str
+    output_hash: str
+    candidates: int
+    accepted: int
+    skipped: int
+    token: int
+    seconds: float
+    at: str

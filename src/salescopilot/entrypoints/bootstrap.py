@@ -8,16 +8,29 @@ from functools import lru_cache
 from pathlib import Path
 
 from salescopilot.adapters.db.sqlite import (
+    SqliteExtractRunRepository,
+    SqliteFactRepository,
     SqliteFollowupRepository,
     SqliteLeadRepository,
+    SqliteRawItemRepository,
     SqliteStageEventRepository,
     default_db_path,
 )
+from salescopilot.adapters.llm.fake import FakeExtractor
 from salescopilot.adapters.template.loader import TemplateError, load_all
-from salescopilot.domain.ports import FollowupRepository, LeadRepository, StageEventRepository
+from salescopilot.domain.ports import (
+    ExtractRunRepository,
+    FactExtractor,
+    FactRepository,
+    FollowupRepository,
+    LeadRepository,
+    RawItemRepository,
+    StageEventRepository,
+)
 from salescopilot.domain.rules import validate_template
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
+from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
@@ -67,3 +80,17 @@ def build_followup_service() -> FollowupService:
     leads: LeadRepository = SqliteLeadRepository(default_db_path())
     followups: FollowupRepository = SqliteFollowupRepository(default_db_path())
     return FollowupService(leads, followups)
+
+
+def build_ingest_service() -> IngestService:
+    """采集与提炼用例：四条仓储 + 提炼器。
+
+    提炼器现在注入 `FakeExtractor`；B5b 换真模型只改这一行，用例与路由不动。
+    """
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    raws: RawItemRepository = SqliteRawItemRepository(db)
+    facts: FactRepository = SqliteFactRepository(db)
+    runs: ExtractRunRepository = SqliteExtractRunRepository(db)
+    extractor: FactExtractor = FakeExtractor()
+    return IngestService(leads, raws, facts, runs, extractor)
