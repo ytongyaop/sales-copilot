@@ -4,7 +4,7 @@
 说明库里的向量与新查询向量不在同一空间，这时返回任何结果都是假的——
 宁可抛 `KnowledgeError` 让用户重建索引，也不返回「看起来像命中」的噪音。
 
-分层说明：清单是本地小 JSON，本层直接读写；`chromadb` / `openai` 一律留在
+分层说明：清单是本地小 JSON，本层直接读写；向量库与模型 SDK 一律留在
 `adapters/`（import-linter 的 `services must not import adapters` 这里必须为 KEPT）。
 """
 
