@@ -1,6 +1,13 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { createLead, listLeads } from './api'
+import {
+  advanceLead,
+  createFollowup,
+  createLead,
+  listFollowups,
+  listLeads,
+  listTemplates,
+} from './api'
 
 // 来源下拉：与后端 ALLOWED_SOURCES 一一对应，这里只是显示文案，取值以字符串为准。
 const SOURCES = [
@@ -11,20 +18,53 @@ const SOURCES = [
   { value: 'other', label: '其他' },
 ]
 
+// 异议下拉：与后端 ALLOWED_OBJECTIONS 一一对应，后端才是唯一权威。
+const OBJECTIONS = [
+  { value: 'price', label: '价格' },
+  { value: 'time', label: '时间' },
+  { value: 'effect', label: '效果' },
+  { value: 'trust', label: '信任' },
+  { value: 'other', label: '其它' },
+]
+
+const templates = ref([])
+const templateKey = ref('edu_training')
 const form = ref({ name: '', contact: '', source: 'referral', owner: '' })
 const leads = ref([])
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
 
+// 每个线索的展开状态、跟进记录与错误各自独立，避免一行报错串到别的行。
+const expandedId = ref('')
+const followups = ref({})
+const followupErrors = ref({})
+const followupForm = ref({ conclusion: '', objection: 'price', next_followup_at: '' })
+const busyId = ref('')
+const savingFollowup = ref(false)
+
 function sourceLabel(value) {
   const hit = SOURCES.find((item) => item.value === value)
+  return hit ? hit.label : value
+}
+
+function objectionLabel(value) {
+  const hit = OBJECTIONS.find((item) => item.value === value)
   return hit ? hit.label : value
 }
 
 function formatTime(iso) {
   if (!iso) return '-'
   return iso.replace('T', ' ').slice(0, 16)
+}
+
+// 「下一阶段」由后端给的模板 flow 计算，不在前端复制流程规则。
+function nextStage(lead) {
+  const template = templates.value.find((item) => item.key === lead.template)
+  if (!template) return ''
+  const index = template.flow.indexOf(lead.stage)
+  if (index < 0 || index === template.flow.length - 1) return ''
+  return template.flow[index + 1]
 }
 
 async function load() {
@@ -39,6 +79,14 @@ async function load() {
   }
 }
 
+async function loadTemplates() {
+  try {
+    templates.value = await listTemplates()
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
 async function submit() {
   submitting.value = true
   error.value = ''
@@ -48,6 +96,7 @@ async function submit() {
       contact: form.value.contact,
       source: form.value.source,
       owner: form.value.owner.trim() === '' ? null : form.value.owner,
+      template: templateKey.value,
     })
     form.value = { name: '', contact: '', source: 'referral', owner: '' }
     await load()
@@ -59,7 +108,61 @@ async function submit() {
   }
 }
 
-onMounted(load)
+async function advance(lead) {
+  const target = nextStage(lead)
+  if (!target) return
+
+  busyId.value = lead.id
+  error.value = ''
+  try {
+    await advanceLead(lead.id, target)
+    await load()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    busyId.value = ''
+  }
+}
+
+async function loadFollowups(leadId) {
+  try {
+    const items = await listFollowups(leadId)
+    followups.value = { ...followups.value, [leadId]: items }
+  } catch (err) {
+    followupErrors.value = { ...followupErrors.value, [leadId]: err.message }
+  }
+}
+
+async function toggleFollowups(lead) {
+  if (expandedId.value === lead.id) {
+    expandedId.value = ''
+    return
+  }
+
+  expandedId.value = lead.id
+  followupForm.value = { conclusion: '', objection: 'price', next_followup_at: '' }
+  followupErrors.value = { ...followupErrors.value, [lead.id]: '' }
+  await loadFollowups(lead.id)
+}
+
+async function saveFollowup(lead) {
+  savingFollowup.value = true
+  followupErrors.value = { ...followupErrors.value, [lead.id]: '' }
+  try {
+    await createFollowup(lead.id, followupForm.value)
+    followupForm.value = { conclusion: '', objection: 'price', next_followup_at: '' }
+    await loadFollowups(lead.id)
+  } catch (err) {
+    followupErrors.value = { ...followupErrors.value, [lead.id]: err.message }
+  } finally {
+    savingFollowup.value = false
+  }
+}
+
+onMounted(async () => {
+  await loadTemplates()
+  await load()
+})
 </script>
 
 <template>
@@ -69,6 +172,14 @@ onMounted(load)
     <section class="card">
       <h2>新增线索</h2>
       <form class="form" @submit.prevent="submit">
+        <label>
+          模板
+          <select v-model="templateKey">
+            <option v-for="item in templates" :key="item.key" :value="item.key">
+              {{ item.name }}
+            </option>
+          </select>
+        </label>
         <label>
           名称
           <input v-model="form.name" type="text" placeholder="填写客户名称" />
@@ -107,16 +218,77 @@ onMounted(load)
             <th>名称</th>
             <th>来源</th>
             <th>归属</th>
+            <th>阶段</th>
             <th>创建时间</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="lead in leads" :key="lead.id">
-            <td>{{ lead.name }}</td>
-            <td>{{ sourceLabel(lead.source) }}</td>
-            <td>{{ lead.owner || '未分配' }}</td>
-            <td>{{ formatTime(lead.created_at) }}</td>
-          </tr>
+          <template v-for="lead in leads" :key="lead.id">
+            <tr>
+              <td>{{ lead.name }}</td>
+              <td>{{ sourceLabel(lead.source) }}</td>
+              <td>{{ lead.owner || '未分配' }}</td>
+              <td>{{ lead.stage }}</td>
+              <td>{{ formatTime(lead.created_at) }}</td>
+              <td class="actions">
+                <button
+                  type="button"
+                  :disabled="busyId === lead.id || !nextStage(lead)"
+                  :title="nextStage(lead) ? `推进到 ${nextStage(lead)}` : '已是最后一步'"
+                  @click="advance(lead)"
+                >
+                  推进
+                </button>
+                <button type="button" class="ghost" @click="toggleFollowups(lead)">
+                  {{ expandedId === lead.id ? '收起' : '记录跟进' }}
+                </button>
+              </td>
+            </tr>
+
+            <tr v-if="expandedId === lead.id" class="expand">
+              <td colspan="6">
+                <div class="followup-form">
+                  <label>
+                    结论
+                    <input
+                      v-model="followupForm.conclusion"
+                      type="text"
+                      placeholder="这次谈了什么、有什么结论"
+                    />
+                  </label>
+                  <label>
+                    异议
+                    <select v-model="followupForm.objection">
+                      <option v-for="item in OBJECTIONS" :key="item.value" :value="item.value">
+                        {{ item.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    下次跟进时间
+                    <input v-model="followupForm.next_followup_at" type="date" />
+                  </label>
+                  <button type="button" :disabled="savingFollowup" @click="saveFollowup(lead)">
+                    {{ savingFollowup ? '保存中…' : '保存跟进' }}
+                  </button>
+                </div>
+
+                <p v-if="followupErrors[lead.id]" class="error">{{ followupErrors[lead.id] }}</p>
+
+                <p v-if="(followups[lead.id] || []).length === 0" class="hint">
+                  还没有跟进记录。
+                </p>
+                <ul v-else class="followup-list">
+                  <li v-for="item in followups[lead.id]" :key="item.id">
+                    <span class="badge">{{ objectionLabel(item.objection) }}</span>
+                    {{ item.conclusion }}
+                    <span class="muted">下次：{{ item.next_followup_at }} · 记录于 {{ formatTime(item.at) }}</span>
+                  </li>
+                </ul>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </section>
@@ -155,7 +327,8 @@ h2 {
   gap: 12px;
   align-items: end;
 }
-.form label {
+.form label,
+.followup-form label {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -163,7 +336,9 @@ h2 {
   color: #57606a;
 }
 .form input,
-.form select {
+.form select,
+.followup-form input,
+.followup-form select {
   padding: 8px 10px;
   border: 1px solid #d0d7de;
   border-radius: 6px;
@@ -184,6 +359,11 @@ button:disabled {
   background: #9db7e0;
   cursor: not-allowed;
 }
+button.ghost {
+  background: #fff;
+  color: #1f6feb;
+  border: 1px solid #c8d8f5;
+}
 table {
   width: 100%;
   border-collapse: collapse;
@@ -194,11 +374,45 @@ td {
   text-align: left;
   padding: 8px 10px;
   border-bottom: 1px solid #eaeef2;
+  vertical-align: top;
 }
 th {
   color: #57606a;
   font-weight: 600;
   font-size: 13px;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+}
+.actions button {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.followup-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: end;
+  padding: 12px 0;
+}
+.followup-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.9;
+}
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  margin-right: 6px;
+  border-radius: 10px;
+  background: #eef2f7;
+  color: #3d4653;
+  font-size: 12px;
+}
+.muted {
+  color: #8a939d;
 }
 .hint {
   color: #57606a;

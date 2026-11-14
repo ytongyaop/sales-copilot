@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from salescopilot.domain.models import INITIAL_STAGE, Lead
+from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
 from salescopilot.domain.ports import LeadRepository
 from salescopilot.domain.rules import ValidationIssue, validate_new_lead
 
@@ -32,6 +32,7 @@ class LeadService:
         contact: str,
         source: str,
         owner: str | None = None,
+        template: str = DEFAULT_TEMPLATE,
     ) -> Lead | list[ValidationIssue]:
         """新建一条线索；校验失败返回问题列表，成功返回落库后的实体。"""
         issues = validate_new_lead(name=name, contact=contact, source=source)
@@ -46,6 +47,7 @@ class LeadService:
             stage=INITIAL_STAGE,
             owner=(owner.strip() or None) if owner is not None else None,
             created_at=self._clock(),
+            template=(template.strip() or DEFAULT_TEMPLATE),
         )
         self._repo.add(lead)
         return lead

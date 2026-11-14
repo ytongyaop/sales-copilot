@@ -6,9 +6,10 @@
 """
 
 from dataclasses import dataclass
+from datetime import date
 
 from salescopilot.domain.blocks import BLOCKS, Block
-from salescopilot.domain.models import ALLOWED_SOURCES
+from salescopilot.domain.models import ALLOWED_OBJECTIONS, ALLOWED_SOURCES
 
 REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow")
 REQUIRED_THRESHOLD_KEYS = (
@@ -56,6 +57,146 @@ def validate_new_lead(*, name: str, contact: str, source: str) -> list[Validatio
         )
 
     return issues
+
+
+def validate_followup(
+    *, conclusion: str, objection: str, next_followup_at: str
+) -> list[ValidationIssue]:
+    """校验一条跟进留痕的三要素；空列表表示可以落库。
+
+    规则：结论去空格后非空且至少 2 个字符；异议必须在 `ALLOWED_OBJECTIONS` 里；
+    下次跟进时间必须是 `YYYY-MM-DD`（`date.fromisoformat` 解析不了就算不合法）。
+    问题逐条返回，不抛异常、不落库。
+    """
+    issues: list[ValidationIssue] = []
+
+    text = conclusion.strip() if isinstance(conclusion, str) else ""
+    if not text:
+        issues.append(ValidationIssue("conclusion", "跟进结论不能为空"))
+    elif len(text) < 2:
+        issues.append(ValidationIssue("conclusion", "跟进结论至少需要 2 个字符"))
+
+    objection_value = objection.strip() if isinstance(objection, str) else ""
+    allowed = "、".join(ALLOWED_OBJECTIONS)
+    if not objection_value:
+        issues.append(ValidationIssue("objection", "客户异议不能为空"))
+    elif objection_value not in ALLOWED_OBJECTIONS:
+        issues.append(
+            ValidationIssue(
+                "objection",
+                f"客户异议必须是以下之一：{allowed}（实际是 {objection_value}）",
+            )
+        )
+
+    raw_date = next_followup_at.strip() if isinstance(next_followup_at, str) else ""
+    if not raw_date:
+        issues.append(ValidationIssue("next_followup_at", "下次跟进时间不能为空"))
+    elif not _is_iso_date(raw_date):
+        issues.append(
+            ValidationIssue(
+                "next_followup_at",
+                f"下次跟进时间必须是 YYYY-MM-DD 格式（实际是 {raw_date}）",
+            )
+        )
+
+    return issues
+
+
+def _is_iso_date(text: str) -> bool:
+    """只认严格 `YYYY-MM-DD`：先比形状，再让 `date.fromisoformat` 判定日历合法性。"""
+    if len(text) != 10 or text[4] != "-" or text[7] != "-":
+        return False
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_advance(
+    template: dict, current_stage: str, target_stage: str, fields: dict
+) -> list[ValidationIssue]:
+    """校验一次阶段推进；空列表表示可以推进。
+
+    规则：
+    1. 当前阶段与目标阶段都必须是模板 `flow` 里的块；
+    2. 目标阶段必须是当前阶段在 `flow` 里的紧邻下一块（不许跳步，也不许倒退）；
+    3. 目标块的 `requires` 字段必须都已填（空串、纯空格、None 都算没填）。
+
+    问题逐条返回，不抛异常、不写库；块契约只从 `blocks.py` 取，不在这里硬编码块名顺序。
+    """
+    issues: list[ValidationIssue] = []
+    block_ids = _flow_block_ids(template)
+
+    if current_stage not in block_ids:
+        issues.append(
+            ValidationIssue("current_stage", f"当前阶段 {current_stage} 不在该模板的流程里")
+        )
+
+    if target_stage not in block_ids:
+        issues.append(ValidationIssue("target_stage", f"模板里没有阶段 {target_stage}"))
+        return issues
+
+    issues.extend(_check_next_stage(block_ids, current_stage, target_stage))
+    if not issues:
+        issues.extend(_check_advance_fields(target_stage, fields))
+    return issues
+
+
+def _flow_block_ids(template: dict) -> list[str]:
+    flow = template.get("flow")
+    if not isinstance(flow, list):
+        return []
+    return [
+        step["block"]
+        for step in flow
+        if isinstance(step, dict) and isinstance(step.get("block"), str)
+    ]
+
+
+def _check_next_stage(
+    block_ids: list[str], current_stage: str, target_stage: str
+) -> list[ValidationIssue]:
+    """只允许走到紧邻下一块；当前阶段不在 flow 里时先不判断（上面已经报过）。"""
+    if current_stage not in block_ids:
+        return []
+
+    index = block_ids.index(current_stage)
+    if index == len(block_ids) - 1:
+        return [
+            ValidationIssue(
+                "target_stage",
+                f"阶段 {current_stage} 已是最后一步，不能再推进（收到 {target_stage}）",
+            )
+        ]
+
+    expected = block_ids[index + 1]
+    if target_stage != expected:
+        return [ValidationIssue("target_stage", f"只能推进到 {expected}，收到 {target_stage}")]
+    return []
+
+
+def _check_advance_fields(target_stage: str, fields: dict) -> list[ValidationIssue]:
+    block = BLOCKS.get(target_stage)
+    if block is None:
+        # 模板引用了未知块：模板校验阶段已经报过，这里不重复判断，也不硬编码块名。
+        return []
+
+    issues: list[ValidationIssue] = []
+    for name in block.requires:
+        if not _is_filled(fields.get(name)):
+            issues.append(
+                ValidationIssue(f"fields.{name}", f"进入阶段 {target_stage} 前必须先填写 {name}")
+            )
+    return issues
+
+
+def _is_filled(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
 
 
 def validate_template(data: dict, blocks: dict[str, Block] = BLOCKS) -> list[ValidationIssue]:

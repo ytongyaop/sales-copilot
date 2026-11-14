@@ -14,9 +14,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from salescopilot.domain.models import Lead
+from salescopilot.domain.models import DEFAULT_TEMPLATE, Followup, Lead, StageEvent
 from salescopilot.domain.rules import ValidationIssue
-from salescopilot.entrypoints.bootstrap import build_lead_service
+from salescopilot.entrypoints.bootstrap import (
+    build_flow_service,
+    build_followup_service,
+    build_lead_service,
+    templates,
+)
+from salescopilot.services.flow import FlowService
+from salescopilot.services.followup import FollowupService
 from salescopilot.services.leads import LeadService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
@@ -27,6 +34,12 @@ FIELD_LABELS = {
     "contact": "联系方式",
     "source": "来源",
     "owner": "归属人",
+    "template": "模板",
+    "target_stage": "目标阶段",
+    "conclusion": "跟进结论",
+    "objection": "客户异议",
+    "next_followup_at": "下次跟进时间",
+    "lead_id": "线索",
 }
 
 
@@ -37,14 +50,42 @@ class LeadIn(BaseModel):
     contact: str
     source: str
     owner: str | None = None
+    template: str = DEFAULT_TEMPLATE
+
+
+class AdvanceIn(BaseModel):
+    """POST /leads/{id}/advance 的请求体：只想推进到哪一步。"""
+
+    target_stage: str
+
+
+class FollowupIn(BaseModel):
+    """POST /leads/{id}/followups 的请求体：跟进三要素。"""
+
+    conclusion: str
+    objection: str
+    next_followup_at: str
 
 
 def get_lead_service() -> Iterator[LeadService]:
-    """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。"""
+    """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
+
+    仓储每次操作自开自闭连接，依赖里不需要持有、也不需要显式关闭连接。
+    """
     yield build_lead_service()
 
 
+def get_flow_service() -> Iterator[FlowService]:
+    yield build_flow_service()
+
+
+def get_followup_service() -> Iterator[FollowupService]:
+    yield build_followup_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
+FlowDep = Annotated[FlowService, Depends(get_flow_service)]
+FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -60,6 +101,28 @@ def _lead_body(lead: Lead) -> dict:
         "stage": lead.stage,
         "owner": lead.owner,
         "created_at": lead.created_at,
+        "template": lead.template,
+    }
+
+
+def _stage_event_body(event: StageEvent) -> dict:
+    return {
+        "id": event.id,
+        "lead_id": event.lead_id,
+        "from_stage": event.from_stage,
+        "to_stage": event.to_stage,
+        "at": event.at,
+    }
+
+
+def _followup_body(item: Followup) -> dict:
+    return {
+        "id": item.id,
+        "lead_id": item.lead_id,
+        "conclusion": item.conclusion,
+        "objection": item.objection,
+        "next_followup_at": item.next_followup_at,
+        "at": item.at,
     }
 
 
@@ -88,6 +151,19 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/templates")
+def list_templates() -> list[dict]:
+    """模板清单：名字 + 阶段顺序（前端据此算「下一阶段」，不复制流程规则）。"""
+    return [
+        {
+            "key": key,
+            "name": str(data.get("name", "")),
+            "flow": [step["block"] for step in data.get("flow", [])],
+        }
+        for key, data in templates().items()
+    ]
+
+
 @app.post("/leads", status_code=201)
 def create_lead(payload: LeadIn, service: LeadDep):
     """新建线索：成功 201 返回完整实体，校验失败 422 返回问题列表。"""
@@ -96,6 +172,7 @@ def create_lead(payload: LeadIn, service: LeadDep):
         contact=payload.contact,
         source=payload.source,
         owner=payload.owner,
+        template=payload.template,
     )
     if isinstance(result, list):
         return JSONResponse(status_code=422, content=_issue_body(result))
@@ -106,3 +183,41 @@ def create_lead(payload: LeadIn, service: LeadDep):
 def list_leads(service: LeadDep) -> list[dict]:
     """线索列表：按创建时间倒序；空表返回 `[]`。"""
     return [_lead_body(lead) for lead in service.list()]
+
+
+@app.post("/leads/{lead_id}/advance")
+def advance_lead(lead_id: str, payload: AdvanceIn, service: FlowDep):
+    """推进阶段：成功 200 返回更新后的线索 + 新写的那条阶段历史。
+
+    线索不存在 404；校验不过 422（跳步、缺必填等都在 `domain/rules.py` 判）。
+    """
+    result = service.advance(lead_id, payload.target_stage)
+    if result.lead is None:
+        return JSONResponse(status_code=404, content=_issue_body(result.issues))
+    if not result.ok:
+        return JSONResponse(status_code=422, content=_issue_body(result.issues))
+
+    events = service.history(lead_id)
+    return {"lead": _lead_body(result.lead), "stage_event": _stage_event_body(events[-1])}
+
+
+@app.post("/leads/{lead_id}/followups", status_code=201)
+def create_followup(lead_id: str, payload: FollowupIn, service: FollowupDep):
+    """记录跟进：成功 201 返回留痕；三要素不合法 422，线索不存在 404。"""
+    ok, issues, item = service.record(
+        lead_id,
+        conclusion=payload.conclusion,
+        objection=payload.objection,
+        next_followup_at=payload.next_followup_at,
+    )
+    if not ok or item is None:
+        missing_lead = any(issue.location == "lead_id" for issue in issues)
+        status = 404 if missing_lead else 422
+        return JSONResponse(status_code=status, content=_issue_body(issues))
+    return _followup_body(item)
+
+
+@app.get("/leads/{lead_id}/followups")
+def list_followups(lead_id: str, service: FollowupDep) -> list[dict]:
+    """该线索的跟进记录：按时间正序；没有记录返回 `[]`。"""
+    return [_followup_body(item) for item in service.list_for(lead_id)]

@@ -4,13 +4,19 @@
 落库一律在 `adapters/db`。实体里不含任何行业叫法。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # 新线索的初始阶段：与流程块契约的首块同名（见 `domain/blocks.py` 的 FIRST_BLOCK_ID）。
 INITIAL_STAGE = "intake"
 
+# 每条线索默认用哪份模板；取值是模板文件名（不含后缀），见 `templates/*.yaml`。
+DEFAULT_TEMPLATE = "edu_training"
+
 # 线索来源只认这几个通用入口；扩展枚举要改这里，不要在别处另写一份。
 ALLOWED_SOURCES: tuple[str, ...] = ("referral", "inbound", "outbound", "event", "other")
+
+# 异议类型：通用分类，不是行业词；扩展枚举同样只改这里。
+ALLOWED_OBJECTIONS: tuple[str, ...] = ("price", "time", "effect", "trust", "other")
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,9 @@ class Lead:
     - `stage`：当前阶段，取值是流程块 id。
     - `owner`：归属人；None 表示尚未分配。
     - `created_at`：ISO8601 字符串，由调用方注入的时钟产生（实体自己不碰时钟）。
+    - `template`：这条线索按哪份模板推进（模板文件名，不含后缀）。
+    - `fields`：已采集的通用字段（键是块契约 `requires` 里的字段名）；
+      事实层落地前先放在这里，推进时用它判断必填是否齐备。
     """
 
     id: str
@@ -29,3 +38,28 @@ class Lead:
     stage: str
     owner: str | None
     created_at: str
+    template: str = DEFAULT_TEMPLATE
+    fields: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StageEvent:
+    """一次阶段转移的留痕：谁（哪条线索）从哪个阶段走到哪个阶段、什么时候。"""
+
+    id: str
+    lead_id: str
+    from_stage: str
+    to_stage: str
+    at: str
+
+
+@dataclass(frozen=True)
+class Followup:
+    """一条跟进留痕：三要素（结论 / 异议 / 下次跟进时间）＋ 写入时间。"""
+
+    id: str
+    lead_id: str
+    conclusion: str
+    objection: str
+    next_followup_at: str
+    at: str

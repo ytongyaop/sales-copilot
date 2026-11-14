@@ -22,7 +22,16 @@ def test_post_lead_returns_201_with_all_fields(client: TestClient) -> None:
 
     assert response.status_code == 201
     body = response.json()
-    assert set(body) == {"id", "name", "contact", "source", "stage", "owner", "created_at"}
+    assert set(body) == {
+        "id",
+        "name",
+        "contact",
+        "source",
+        "stage",
+        "owner",
+        "created_at",
+        "template",
+    }
     assert body["name"] == VALID["name"]
     assert body["stage"] == "intake"
     assert body["owner"] == VALID["owner"]

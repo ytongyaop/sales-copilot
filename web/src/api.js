@@ -33,16 +33,36 @@ async function request(path, options) {
   return data
 }
 
+function jsonOptions(method, payload) {
+  return {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }
+}
+
 export function listLeads() {
   return request('/leads')
 }
 
 export function createLead(payload) {
-  return request('/leads', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+  return request('/leads', jsonOptions('POST', payload))
+}
+
+export function listTemplates() {
+  return request('/templates')
+}
+
+export function advanceLead(leadId, targetStage) {
+  return request(`/leads/${leadId}/advance`, jsonOptions('POST', { target_stage: targetStage }))
+}
+
+export function listFollowups(leadId) {
+  return request(`/leads/${leadId}/followups`)
+}
+
+export function createFollowup(leadId, payload) {
+  return request(`/leads/${leadId}/followups`, jsonOptions('POST', payload))
 }
 
 export { OFFLINE_MESSAGE }
