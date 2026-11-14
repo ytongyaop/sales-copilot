@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from salescopilot.adapters.db.sqlite import SqliteStageEventRepository
 from salescopilot.entrypoints.api.app import app
 
 LEAD = {"name": "张伟", "contact": "13800001111", "source": "referral"}
@@ -36,6 +37,21 @@ def test_get_templates_returns_three_with_flow_lengths(client: TestClient) -> No
     assert lengths == {"edu_training": 6, "software_outsourcing": 6, "building_materials": 5}
 
 
+def test_get_templates_carries_labels(client: TestClient) -> None:
+    """labels 里行业叫法来自模板 label，通用叫法来自 domain/labels.py。"""
+    body = {item["key"]: item for item in client.get("/templates").json()}
+    edu_labels = body["edu_training"]["labels"]
+
+    assert edu_labels["appointment"] == "试听"
+    assert edu_labels["first_contact"] == "首次联系"
+    assert set(edu_labels) == set(body["edu_training"]["flow"])
+
+    # 建材模板没有 appointment 块，其余块同样要有名字
+    building_labels = body["building_materials"]["labels"]
+    assert building_labels["intake"] == "线索入库"
+    assert set(building_labels) == set(body["building_materials"]["flow"])
+
+
 def test_create_lead_defaults_to_edu_template(client: TestClient) -> None:
     body = _create_lead(client)
 
@@ -61,6 +77,19 @@ def test_advance_success_returns_lead_and_stage_event(client: TestClient) -> Non
     assert listed["template"] == "edu_training"
 
 
+def test_advance_event_matches_persisted_history(client: TestClient, tmp_path: Path) -> None:
+    """返回体里的 stage_event 就是刚写进库的那条，不是事后猜的。"""
+    lead = _create_lead(client)
+
+    response = client.post(f"/leads/{lead['id']}/advance", json={"target_stage": "first_contact"})
+    assert response.status_code == 200, response.text
+
+    returned = response.json()["stage_event"]
+    persisted = SqliteStageEventRepository(tmp_path / "api.sqlite3").list_for(lead["id"])
+    assert persisted[-1].id == returned["id"]
+    assert len(persisted) == 1
+
+
 def test_advance_skip_stage_returns_422_with_location(client: TestClient) -> None:
     lead = _create_lead(client)
 
@@ -69,7 +98,8 @@ def test_advance_skip_stage_returns_422_with_location(client: TestClient) -> Non
     assert response.status_code == 422
     issues = response.json()["issues"]
     assert issues[0]["location"] == "target_stage"
-    assert "只能推进到 first_contact" in issues[0]["message"]
+    assert "只能推进到「首次联系」" in issues[0]["message"]
+    assert "first_contact" not in issues[0]["message"]
     assert client.get("/leads").json()[0]["stage"] == "intake"
 
 

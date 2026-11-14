@@ -58,6 +58,25 @@ def test_post_lead_bad_source_returns_422(client: TestClient) -> None:
     assert body["issues"][0]["location"] == "source"
 
 
+def test_post_lead_unknown_template_returns_422(client: TestClient) -> None:
+    """模板校验在 service 里做：不在已加载清单就 422，不落库。"""
+    response = client.post("/leads", json={**VALID, "template": "foo"})
+
+    assert response.status_code == 422
+    issues = response.json()["issues"]
+    assert [issue["location"] for issue in issues] == ["template"]
+    assert "未知模板" in issues[0]["message"]
+    assert "foo" in issues[0]["message"]
+    assert client.get("/leads").json() == []
+
+
+def test_post_lead_blank_template_falls_back_to_default(client: TestClient) -> None:
+    response = client.post("/leads", json={**VALID, "template": "  "})
+
+    assert response.status_code == 201, response.text
+    assert response.json()["template"] == "edu_training"
+
+
 def test_get_leads_returns_created_items(client: TestClient) -> None:
     assert client.get("/leads").json() == []
     client.post("/leads", json=VALID)

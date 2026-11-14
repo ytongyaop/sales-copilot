@@ -5,12 +5,16 @@
 """
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 
 from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
 from salescopilot.domain.ports import LeadRepository
-from salescopilot.domain.rules import ValidationIssue, validate_new_lead
+from salescopilot.domain.rules import (
+    ValidationIssue,
+    validate_new_lead,
+    validate_template_key,
+)
 
 
 def utc_now_iso() -> str:
@@ -19,10 +23,20 @@ def utc_now_iso() -> str:
 
 
 class LeadService:
-    """线索用例边界：入参进、实体或问题列表出。"""
+    """线索用例边界：入参进、实体或问题列表出。
 
-    def __init__(self, repo: LeadRepository, clock: Callable[[], str] | None = None) -> None:
+    `allowed_templates` 是已加载模板的 key 集合，由装配点注入；本层不认识文件系统，
+    也不硬编码有哪些模板。
+    """
+
+    def __init__(
+        self,
+        repo: LeadRepository,
+        allowed_templates: Collection[str] = (DEFAULT_TEMPLATE,),
+        clock: Callable[[], str] | None = None,
+    ) -> None:
         self._repo = repo
+        self._allowed_templates = allowed_templates
         self._clock = clock if clock is not None else utc_now_iso
 
     def create(
@@ -35,7 +49,9 @@ class LeadService:
         template: str = DEFAULT_TEMPLATE,
     ) -> Lead | list[ValidationIssue]:
         """新建一条线索；校验失败返回问题列表，成功返回落库后的实体。"""
+        resolved_template = (template or "").strip() or DEFAULT_TEMPLATE
         issues = validate_new_lead(name=name, contact=contact, source=source)
+        issues.extend(validate_template_key(resolved_template, self._allowed_templates))
         if issues:
             return issues
 
@@ -47,7 +63,7 @@ class LeadService:
             stage=INITIAL_STAGE,
             owner=(owner.strip() or None) if owner is not None else None,
             created_at=self._clock(),
-            template=(template.strip() or DEFAULT_TEMPLATE),
+            template=resolved_template,
         )
         self._repo.add(lead)
         return lead

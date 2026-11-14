@@ -50,9 +50,9 @@ def template_loader(key: str) -> dict:
 
 
 def build_lead_service() -> LeadService:
-    """读配置 → 建 SQLite 仓储 → 注入用例服务。"""
+    """读配置 → 建 SQLite 仓储 → 注入用例服务（允许的模板 key 取自启动时已加载的清单）。"""
     repo: LeadRepository = SqliteLeadRepository(default_db_path())
-    return LeadService(repo)
+    return LeadService(repo, allowed_templates=frozenset(templates()))
 
 
 def build_flow_service() -> FlowService:

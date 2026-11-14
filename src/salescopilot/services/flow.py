@@ -16,11 +16,12 @@ from salescopilot.services.leads import utc_now_iso
 
 @dataclass(frozen=True)
 class AdvanceResult:
-    """一次推进的结果：成功时带更新后的线索，失败时带问题列表。"""
+    """一次推进的结果：成功时带更新后的线索与新写的那条阶段历史。"""
 
     ok: bool
     lead: Lead | None
     issues: list[ValidationIssue]
+    event: StageEvent | None = None
 
 
 class FlowService:
@@ -48,7 +49,7 @@ class FlowService:
             template = self._template_loader(lead.template)
         except KeyError:
             return AdvanceResult(
-                False, lead, [ValidationIssue("template", f"未知模板：{lead.template}")]
+                False, lead, [ValidationIssue("template", f"未知模板：「{lead.template}」")]
             )
 
         issues = validate_advance(template, lead.stage, target_stage, self._fields(lead))
@@ -64,7 +65,7 @@ class FlowService:
             at=self._clock(),
         )
         self._events.add(event)
-        return AdvanceResult(True, replace(lead, stage=target_stage), [])
+        return AdvanceResult(True, replace(lead, stage=target_stage), [], event)
 
     def history(self, lead_id: str) -> list[StageEvent]:
         """该线索的阶段历史，按时间正序（顺序由仓储实现保证）。"""

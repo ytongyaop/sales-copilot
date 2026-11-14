@@ -5,10 +5,12 @@
 方便上层把错误直接翻译成「第几步的第几个块坏了」。
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 
 from salescopilot.domain.blocks import BLOCKS, Block
+from salescopilot.domain.labels import block_label, field_label
 from salescopilot.domain.models import ALLOWED_OBJECTIONS, ALLOWED_SOURCES
 
 REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow")
@@ -57,6 +59,16 @@ def validate_new_lead(*, name: str, contact: str, source: str) -> list[Validatio
         )
 
     return issues
+
+
+def validate_template_key(template: str, allowed: Collection[str]) -> list[ValidationIssue]:
+    """校验线索要挂的模板是否在已加载清单里；空列表表示可用。
+
+    清单由装配点（`entrypoints/bootstrap.py`）从已加载模板传进来，本函数不认识文件系统。
+    """
+    if template in allowed:
+        return []
+    return [ValidationIssue("template", f"未知模板：「{template}」")]
 
 
 def validate_followup(
@@ -130,11 +142,13 @@ def validate_advance(
 
     if current_stage not in block_ids:
         issues.append(
-            ValidationIssue("current_stage", f"当前阶段 {current_stage} 不在该模板的流程里")
+            ValidationIssue("current_stage", f"未知的阶段：「{block_label(current_stage)}」")
         )
 
     if target_stage not in block_ids:
-        issues.append(ValidationIssue("target_stage", f"模板里没有阶段 {target_stage}"))
+        issues.append(
+            ValidationIssue("target_stage", f"未知的阶段：「{block_label(target_stage)}」")
+        )
         return issues
 
     issues.extend(_check_next_stage(block_ids, current_stage, target_stage))
@@ -166,13 +180,19 @@ def _check_next_stage(
         return [
             ValidationIssue(
                 "target_stage",
-                f"阶段 {current_stage} 已是最后一步，不能再推进（收到 {target_stage}）",
+                f"阶段「{block_label(current_stage)}」已是最后一步，不能再推进"
+                f"（收到「{block_label(target_stage)}」）",
             )
         ]
 
     expected = block_ids[index + 1]
     if target_stage != expected:
-        return [ValidationIssue("target_stage", f"只能推进到 {expected}，收到 {target_stage}")]
+        return [
+            ValidationIssue(
+                "target_stage",
+                f"只能推进到「{block_label(expected)}」，收到「{block_label(target_stage)}」",
+            )
+        ]
     return []
 
 
@@ -186,7 +206,10 @@ def _check_advance_fields(target_stage: str, fields: dict) -> list[ValidationIss
     for name in block.requires:
         if not _is_filled(fields.get(name)):
             issues.append(
-                ValidationIssue(f"fields.{name}", f"进入阶段 {target_stage} 前必须先填写 {name}")
+                ValidationIssue(
+                    f"fields.{name}",
+                    f"进入阶段「{block_label(target_stage)}」前必须先填写「{field_label(name)}」",
+                )
             )
     return issues
 
@@ -257,7 +280,7 @@ def _check_flow(
 
         block_id = step["block"]
         if not isinstance(block_id, str) or block_id not in blocks:
-            issues.append(ValidationIssue(f"flow[{index}]", f"未知的块：{block_id!r}"))
+            issues.append(ValidationIssue(f"flow[{index}]", f"未知的块：「{block_id}」"))
             block_ids.append(None)
             continue
 

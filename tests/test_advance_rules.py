@@ -21,8 +21,10 @@ def test_skip_stage_rejected_with_target_location() -> None:
     issues = validate_advance(FLOW, "intake", "qualify", {"contact": "13800001111"})
 
     assert [issue.location for issue in issues] == ["target_stage"]
-    assert "只能推进到 first_contact" in issues[0].message
-    assert "qualify" in issues[0].message
+    assert "只能推进到「首次联系」" in issues[0].message
+    assert "「需求确认」" in issues[0].message
+    assert "first_contact" not in issues[0].message
+    assert "qualify" not in issues[0].message
 
 
 def test_missing_required_fields_rejected_per_field() -> None:
@@ -30,8 +32,11 @@ def test_missing_required_fields_rejected_per_field() -> None:
     issues = validate_advance(FLOW, "first_contact", "qualify", {"contact": "13800001111"})
 
     assert [issue.location for issue in issues] == ["fields.decision_maker", "fields.need"]
-    assert "decision_maker" in issues[0].message
-    assert "need" in issues[1].message
+    assert "进入阶段「需求确认」前必须先填写「决策人」" in issues[0].message
+    assert "「核心需求」" in issues[1].message
+    for issue in issues:
+        assert "decision_maker" not in issue.message
+        assert "need" not in issue.message
 
 
 def test_blank_field_counts_as_missing() -> None:
@@ -52,7 +57,7 @@ def test_unknown_target_stage_rejected() -> None:
     issues = validate_advance(FLOW, "intake", "nonexistent", {"contact": "13800001111"})
 
     assert [issue.location for issue in issues] == ["target_stage"]
-    assert "nonexistent" in issues[0].message
+    assert "未知的阶段：「nonexistent」" in issues[0].message
 
 
 def test_advance_from_terminal_stage_rejected() -> None:
@@ -61,3 +66,4 @@ def test_advance_from_terminal_stage_rejected() -> None:
 
     assert [issue.location for issue in issues] == ["target_stage"]
     assert "已是最后一步" in issues[0].message
+    assert "「成交/关闭」" in issues[0].message

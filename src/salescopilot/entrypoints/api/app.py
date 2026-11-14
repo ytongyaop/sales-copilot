@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from salescopilot.domain.labels import block_label
 from salescopilot.domain.models import DEFAULT_TEMPLATE, Followup, Lead, StageEvent
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.entrypoints.bootstrap import (
@@ -151,17 +152,36 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _template_body(key: str, data: dict) -> dict:
+    """模板清单的一项：名字 + 阶段顺序 + 每块的中文名。
+
+    中文名先取模板 YAML 里该块的 `label`（行业叫法只允许出现在这里），
+    没有才退回 `domain/labels.py` 的通用叫法；两者都没有就用块 id。
+    """
+    steps = [
+        step
+        for step in data.get("flow", [])
+        if isinstance(step, dict) and isinstance(step.get("block"), str)
+    ]
+    labels: dict[str, str] = {}
+    for step in steps:
+        block_id = step["block"]
+        label = step.get("label")
+        labels[block_id] = (
+            label if isinstance(label, str) and label.strip() else block_label(block_id)
+        )
+    return {
+        "key": key,
+        "name": str(data.get("name", "")),
+        "flow": [step["block"] for step in steps],
+        "labels": labels,
+    }
+
+
 @app.get("/templates")
 def list_templates() -> list[dict]:
-    """模板清单：名字 + 阶段顺序（前端据此算「下一阶段」，不复制流程规则）。"""
-    return [
-        {
-            "key": key,
-            "name": str(data.get("name", "")),
-            "flow": [step["block"] for step in data.get("flow", [])],
-        }
-        for key, data in templates().items()
-    ]
+    """模板清单：名字 + 阶段顺序 + 每块中文名（前端据此算「下一阶段」并显示中文名）。"""
+    return [_template_body(key, data) for key, data in templates().items()]
 
 
 @app.post("/leads", status_code=201)
@@ -194,11 +214,10 @@ def advance_lead(lead_id: str, payload: AdvanceIn, service: FlowDep):
     result = service.advance(lead_id, payload.target_stage)
     if result.lead is None:
         return JSONResponse(status_code=404, content=_issue_body(result.issues))
-    if not result.ok:
+    if not result.ok or result.event is None:
         return JSONResponse(status_code=422, content=_issue_body(result.issues))
 
-    events = service.history(lead_id)
-    return {"lead": _lead_body(result.lead), "stage_event": _stage_event_body(events[-1])}
+    return {"lead": _lead_body(result.lead), "stage_event": _stage_event_body(result.event)}
 
 
 @app.post("/leads/{lead_id}/followups", status_code=201)

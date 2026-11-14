@@ -59,12 +59,29 @@ function formatTime(iso) {
 }
 
 // 「下一阶段」由后端给的模板 flow 计算，不在前端复制流程规则。
+function templateOf(lead) {
+  return templates.value.find((item) => item.key === lead.template)
+}
+
+// 阶段中文名：优先用模板给的 labels（行业叫法只在后端模板里），没有再退回块 id。
+function stageLabel(lead) {
+  const template = templateOf(lead)
+  return (template && template.labels && template.labels[lead.stage]) || lead.stage
+}
+
 function nextStage(lead) {
-  const template = templates.value.find((item) => item.key === lead.template)
+  const template = templateOf(lead)
   if (!template) return ''
   const index = template.flow.indexOf(lead.stage)
   if (index < 0 || index === template.flow.length - 1) return ''
   return template.flow[index + 1]
+}
+
+function nextStageLabel(lead) {
+  const next = nextStage(lead)
+  if (!next) return ''
+  const template = templateOf(lead)
+  return (template && template.labels && template.labels[next]) || next
 }
 
 async function load() {
@@ -229,16 +246,16 @@ onMounted(async () => {
               <td>{{ lead.name }}</td>
               <td>{{ sourceLabel(lead.source) }}</td>
               <td>{{ lead.owner || '未分配' }}</td>
-              <td>{{ lead.stage }}</td>
+              <td>{{ stageLabel(lead) }}</td>
               <td>{{ formatTime(lead.created_at) }}</td>
               <td class="actions">
                 <button
                   type="button"
                   :disabled="busyId === lead.id || !nextStage(lead)"
-                  :title="nextStage(lead) ? `推进到 ${nextStage(lead)}` : '已是最后一步'"
+                  :title="nextStage(lead) ? `推进到 ${nextStageLabel(lead)}` : '已是最后一步'"
                   @click="advance(lead)"
                 >
-                  推进
+                  {{ nextStage(lead) ? `推进到 ${nextStageLabel(lead)}` : '推进' }}
                 </button>
                 <button type="button" class="ghost" @click="toggleFollowups(lead)">
                   {{ expandedId === lead.id ? '收起' : '记录跟进' }}
