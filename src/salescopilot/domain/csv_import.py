@@ -7,7 +7,8 @@
 2. 第一行可以是有表头的（出现「姓名 / 名称」即视为表头），也可以没有表头
    （此时列序固定为 name, contact, source, owner）；表头里不认识的列直接忽略；
 3. `source` 只认 `ALLOWED_SOURCES`：英文键原样接受，中文别名按 `SOURCE_ALIASES` 翻译；
-4. 空行跳过；缺姓名或联系方式的行记一条问题并跳过，**不中断整批**；
+4. 空行跳过；缺姓名或联系方式的行记一条问题并跳过，**不中断整批**；联系方式长度
+   与新建线索共用 `domain/rules.py` 的同一条规则（去空格后至少 `MIN_CONTACT_LEN` 个字符）；
 5. 超过 2MB 的文本整批拒绝（问题行号记 0，表示是文件级问题）。
 """
 
@@ -16,6 +17,7 @@ import io
 from dataclasses import dataclass
 
 from salescopilot.domain.models import ALLOWED_SOURCES
+from salescopilot.domain.rules import CONTACT_TOO_SHORT, MIN_CONTACT_LEN
 
 MAX_BYTES = 2 * 1024 * 1024
 
@@ -96,6 +98,10 @@ def parse_csv(text: str) -> tuple[list[ParsedRow], list[RowIssue]]:
             continue
         if not contact:
             issues.append(RowIssue(row_no, "缺少联系方式"))
+            continue
+        if len(contact) < MIN_CONTACT_LEN:
+            # 与 `POST /leads` 同一条规则：导入不再接受「非空但太短」的联系方式。
+            issues.append(RowIssue(row_no, CONTACT_TOO_SHORT))
             continue
 
         source = normalize_source(source_text)

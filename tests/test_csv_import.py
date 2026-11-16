@@ -9,6 +9,7 @@ from salescopilot.domain.csv_import import (
     RowIssue,
     parse_csv,
 )
+from salescopilot.domain.rules import CONTACT_TOO_SHORT, validate_new_lead
 
 
 def test_header_csv_maps_columns_and_skips_blank_lines() -> None:
@@ -94,3 +95,23 @@ def test_oversized_text_is_rejected_as_a_whole() -> None:
 
     assert rows == []
     assert issues == [RowIssue(row_no=0, message="文件过大")]
+
+
+def test_too_short_contact_is_skipped_with_shared_reason() -> None:
+    """`139`（2 个字符）这一行被跳过，原因就是新建线索那条规则的原文案。"""
+    text = "姓名,联系方式,来源\n张三,139,转介绍\n李四,13900,活动\n"
+
+    rows, issues = parse_csv(text)
+
+    assert rows == [ParsedRow(row_no=3, name="李四", contact="13900", source="event", owner=None)]
+    assert issues == [RowIssue(row_no=2, message=CONTACT_TOO_SHORT)]
+
+
+def test_csv_and_new_lead_report_the_same_contact_message() -> None:
+    """同一条规则、同一句原因：导入与 `POST /leads` 不各写一份阈值和文案。"""
+    rows, issues = parse_csv("姓名,联系方式,来源\n张三,139,转介绍\n")
+    lead_issues = validate_new_lead(name="张三", contact="139", source="referral")
+
+    assert rows == []
+    assert [issue.message for issue in issues] == [issue.message for issue in lead_issues]
+    assert lead_issues[0].message == CONTACT_TOO_SHORT

@@ -13,6 +13,11 @@ from salescopilot.domain.blocks import BLOCKS, Block
 from salescopilot.domain.labels import block_label, field_label
 from salescopilot.domain.models import ALLOWED_OBJECTIONS, ALLOWED_SOURCES
 
+# 联系方式的最小长度与对应的原因文案：新建线索（这里）与 CSV 导入
+# （`domain/csv_import.py`）共用这一条，两边不各写一份阈值和一句提示。
+MIN_CONTACT_LEN = 5
+CONTACT_TOO_SHORT = "联系方式至少需要 5 个字符"
+
 REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow")
 REQUIRED_THRESHOLD_KEYS = (
     "first_response_minutes",
@@ -46,8 +51,8 @@ def validate_new_lead(*, name: str, contact: str, source: str) -> list[Validatio
     stripped_contact = contact.strip()
     if not stripped_contact:
         issues.append(ValidationIssue("contact", "联系方式不能为空"))
-    elif len(stripped_contact) < 5:
-        issues.append(ValidationIssue("contact", "联系方式至少需要 5 个字符"))
+    elif len(stripped_contact) < MIN_CONTACT_LEN:
+        issues.append(ValidationIssue("contact", CONTACT_TOO_SHORT))
 
     stripped_source = source.strip()
     allowed = "、".join(ALLOWED_SOURCES)
