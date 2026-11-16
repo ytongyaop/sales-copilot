@@ -45,6 +45,26 @@ export function listLeads() {
   return request('/leads')
 }
 
+// ---------------------------------------------------------------- 公海 / 归属
+
+export function listPool() {
+  return request('/leads/pool')
+}
+
+// 认领：后端判定「能不能认领」，前端只发负责人名字；已被别人占了会回 409 + 中文提示。
+export function claimLead(leadId, owner) {
+  return request(`/leads/${leadId}/claim`, jsonOptions('POST', { owner }))
+}
+
+export function releaseLead(leadId) {
+  return request(`/leads/${leadId}/release`, { method: 'POST' })
+}
+
+// 提醒：阈值判定全在后端（模板 thresholds），前端只按 level 上色。
+export function listReminders() {
+  return request('/reminders')
+}
+
 // 运行模式：演示前先确认后端是真模型还是假模型（假模型的数据不能当真实结论）。
 export function getHealth() {
   return request('/health')

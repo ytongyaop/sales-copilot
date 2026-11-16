@@ -24,22 +24,28 @@ from salescopilot.domain.models import (
     RawItem,
     StageEvent,
 )
+from salescopilot.domain.reminders import Reminder
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.entrypoints.bootstrap import (
+    build_assignment_service,
     build_draft_service,
     build_flow_service,
     build_followup_service,
     build_ingest_service,
     build_lead_service,
+    build_reclaim_service,
+    build_reminder_service,
     check_live_config,
     mode_info,
     templates,
 )
+from salescopilot.services.assignment import AssignmentService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
+from salescopilot.services.reminder_service import ReclaimService, ReminderService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
 
@@ -108,6 +114,12 @@ class DraftConfirmIn(BaseModel):
     next_followup_at: str
 
 
+class ClaimIn(BaseModel):
+    """POST /leads/{id}/claim 的请求体：认领人。"""
+
+    owner: str
+
+
 def get_lead_service() -> Iterator[LeadService]:
     """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
 
@@ -132,11 +144,26 @@ def get_draft_service() -> Iterator[DraftService]:
     yield build_draft_service()
 
 
+def get_assignment_service() -> Iterator[AssignmentService]:
+    yield build_assignment_service()
+
+
+def get_reminder_service() -> Iterator[ReminderService]:
+    yield build_reminder_service()
+
+
+def get_reclaim_service() -> Iterator[ReclaimService]:
+    yield build_reclaim_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
 IngestDep = Annotated[IngestService, Depends(get_ingest_service)]
 DraftDep = Annotated[DraftService, Depends(get_draft_service)]
+AssignmentDep = Annotated[AssignmentService, Depends(get_assignment_service)]
+ReminderDep = Annotated[ReminderService, Depends(get_reminder_service)]
+ReclaimDep = Annotated[ReclaimService, Depends(get_reclaim_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -222,6 +249,27 @@ def _run_body(run: ExtractRun) -> dict:
     }
 
 
+def _reminder_body(reminder: Reminder, *, lead_name: str) -> dict:
+    """一条提醒：带 `lead_name`，前端不必为了显示名字再查一遍线索。"""
+    return {
+        "lead_id": reminder.lead_id,
+        "lead_name": lead_name,
+        "kind": reminder.kind,
+        "level": reminder.level,
+        "message": reminder.message,
+        "since_minutes": reminder.since_minutes,
+    }
+
+
+def _assignment_status(issues: list[ValidationIssue]) -> int:
+    """归属接口的状态码：没有这条线索 404、状态冲突（已归属/尚未归属）409、其余入参问题 422。"""
+    if any(issue.location == "lead_id" for issue in issues):
+        return 404
+    if any("已归属" in issue.message or "尚未归属" in issue.message for issue in issues):
+        return 409
+    return 422
+
+
 @app.exception_handler(RequestValidationError)
 async def _request_validation_handler(
     request: Request, exc: RequestValidationError
@@ -303,6 +351,58 @@ def create_lead(payload: LeadIn, service: LeadDep):
 def list_leads(service: LeadDep) -> list[dict]:
     """线索列表：按创建时间倒序；空表返回 `[]`。"""
     return [_lead_body(lead) for lead in service.list()]
+
+
+@app.get("/leads/pool")
+def list_lead_pool(service: AssignmentDep) -> list[dict]:
+    """公海：没有归属人的线索，按创建时间倒序；空表返回 `[]`。"""
+    return [_lead_body(lead) for lead in service.pool()]
+
+
+@app.post("/leads/{lead_id}/claim")
+def claim_lead(lead_id: str, payload: ClaimIn, service: AssignmentDep):
+    """认领一条公海线索：成功 200 返回更新后的线索。
+
+    线索不存在 404；已在别人名下 409；归属人为空 422——都带中文 issues。
+    """
+    lead, issues = service.claim(lead_id, payload.owner)
+    if issues:
+        return JSONResponse(status_code=_assignment_status(issues), content=_issue_body(issues))
+    return _lead_body(lead)
+
+
+@app.post("/leads/{lead_id}/release")
+def release_lead(lead_id: str, service: AssignmentDep):
+    """把线索放回公海：成功 200 返回更新后的线索；线索不存在 404、本来就在公海 409。"""
+    lead, issues = service.release(lead_id)
+    if issues:
+        return JSONResponse(status_code=_assignment_status(issues), content=_issue_body(issues))
+    return _lead_body(lead)
+
+
+@app.get("/reminders")
+def list_reminders(service: ReminderDep) -> list[dict]:
+    """全部提醒：按严重度倒序；每条带 `lead_name` 便于前端直接展示。"""
+    names = service.lead_names()
+    return [
+        _reminder_body(item, lead_name=names.get(item.lead_id, "")) for item in service.list_all()
+    ]
+
+
+@app.get("/leads/{lead_id}/reminders")
+def list_lead_reminders(lead_id: str, service: ReminderDep) -> list[dict]:
+    """该线索的提醒；线索不存在或没有提醒都返回 `[]`。"""
+    names = service.lead_names()
+    return [
+        _reminder_body(item, lead_name=names.get(item.lead_id, ""))
+        for item in service.for_lead(lead_id)
+    ]
+
+
+@app.post("/reclaim/scan")
+def reclaim_scan(service: ReclaimDep) -> dict:
+    """首响超时自动回收：显式触发一次扫描，返回被回收的线索；没有回收返回空列表。"""
+    return {"reclaimed": service.scan()}
 
 
 @app.post("/leads/{lead_id}/advance")

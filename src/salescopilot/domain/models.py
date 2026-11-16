@@ -18,6 +18,9 @@ ALLOWED_SOURCES: tuple[str, ...] = ("referral", "inbound", "outbound", "event", 
 # 异议类型：通用分类，不是行业词；扩展枚举同样只改这里。
 ALLOWED_OBJECTIONS: tuple[str, ...] = ("price", "time", "effect", "trust", "other")
 
+# 归属变更原因：为什么这条线索换了/没了归属人；扩展枚举同样只改这里。
+ALLOWED_ASSIGNMENT_REASONS: tuple[str, ...] = ("claim", "release", "auto_reclaim", "manual")
+
 # 草稿状态：生成即 pending；确认落库后 confirmed；人工丢弃后 discarded（不再可确认）。
 DRAFT_PENDING = "pending"
 DRAFT_CONFIRMED = "confirmed"
@@ -67,6 +70,23 @@ class Followup:
     conclusion: str
     objection: str
     next_followup_at: str
+    at: str
+
+
+@dataclass(frozen=True)
+class AssignmentEvent:
+    """一次归属变更的留痕：从谁名下到谁名下、为什么。
+
+    - `reason`：`claim`（认领）/ `release`（释放）/ `auto_reclaim`（首响超时自动回公海）
+      / `manual`（人工手工调整）；扩展枚举只改 `ALLOWED_ASSIGNMENT_REASONS`。
+    - `from_owner` / `to_owner`：None 表示「没有归属人」（公海）。
+    """
+
+    id: str
+    lead_id: str
+    from_owner: str | None
+    to_owner: str | None
+    reason: str
     at: str
 
 

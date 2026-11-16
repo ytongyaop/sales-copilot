@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from salescopilot.adapters.db.sqlite import (
+    SqliteAssignmentEventRepository,
     SqliteDraftRepository,
     SqliteExtractRunRepository,
     SqliteFactRepository,
@@ -33,6 +34,7 @@ from salescopilot.config import (
     require_embed_key,
 )
 from salescopilot.domain.ports import (
+    AssignmentEventRepository,
     DraftGenerator,
     DraftRepository,
     Embedder,
@@ -46,12 +48,14 @@ from salescopilot.domain.ports import (
     VectorStore,
 )
 from salescopilot.domain.rules import validate_template
+from salescopilot.services.assignment import AssignmentService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.knowledge import KnowledgeService
 from salescopilot.services.leads import LeadService
+from salescopilot.services.reminder_service import ReclaimService, ReminderService
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
@@ -106,6 +110,30 @@ def build_followup_service() -> FollowupService:
     leads: LeadRepository = SqliteLeadRepository(default_db_path())
     followups: FollowupRepository = SqliteFollowupRepository(default_db_path())
     return FollowupService(leads, followups)
+
+
+def build_assignment_service() -> AssignmentService:
+    """归属用例：线索仓储 + 归属事件仓储 + 模板加载器（当前不参与判定，先注入备用）。"""
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    events: AssignmentEventRepository = SqliteAssignmentEventRepository(db)
+    return AssignmentService(leads, events, template_loader=template_loader)
+
+
+def build_reminder_service() -> ReminderService:
+    """提醒用例：线索 + 跟进仓储 + 模板加载器（阈值按每条线索自己的模板读）。"""
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    followups: FollowupRepository = SqliteFollowupRepository(db)
+    return ReminderService(leads, followups, template_loader)
+
+
+def build_reclaim_service() -> ReclaimService:
+    """自动回收用例：线索 + 归属事件仓储 + 模板加载器（口径与提醒一致）。"""
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    events: AssignmentEventRepository = SqliteAssignmentEventRepository(db)
+    return ReclaimService(leads, events, template_loader)
 
 
 def build_extractor(live: bool | None = None) -> FactExtractor:

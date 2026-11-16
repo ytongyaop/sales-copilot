@@ -1,7 +1,8 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   advanceLead,
+  claimLead,
   confirmDraft,
   createDraft,
   createFollowup,
@@ -13,8 +14,11 @@ import {
   listFacts,
   listFollowups,
   listLeads,
+  listPool,
+  listReminders,
   listTemplates,
   patchFact,
+  releaseLead,
 } from './api'
 
 // 来源下拉：与后端 ALLOWED_SOURCES 一一对应，这里只是显示文案，取值以字符串为准。
@@ -42,6 +46,12 @@ const leads = ref([])
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
+
+// 公海与提醒：都是后端算好的事实（前端不复制阈值），这里只存一份供筛选与显示。
+const pool = ref([])
+const reminders = ref({})
+const riskFilter = ref('')
+const LEVEL_LABELS = { red: '红', yellow: '黄', gray: '灰' }
 
 // 后端 /health 给的运行模式：真心模型还是假模型，必须在顶部一眼看出来——
 // 假模型（演示数据不可信）的草稿与事实不能当成真实结论。
@@ -115,6 +125,83 @@ function formatTime(iso) {
   return iso.replace('T', ' ').slice(0, 16)
 }
 
+// -------------------------------------------------------------- 公海 / 风险
+// 每条线索最多一条提醒（后端保证同线索取最严重）：按 lead_id 建索引，列表一行只看自己的那一条。
+function riskOf(leadId) {
+  return reminders.value[leadId] || null
+}
+
+function riskLabel(level) {
+  return LEVEL_LABELS[level] || level
+}
+
+const poolCount = computed(() => pool.value.length)
+const remindedCount = computed(() => Object.keys(reminders.value).length)
+
+// 顶部筛选：点一下只看公海，再点一下恢复全部；有提醒同理。
+const visibleLeads = computed(() => {
+  if (riskFilter.value === 'pool') return leads.value.filter((lead) => !lead.owner)
+  if (riskFilter.value === 'reminded') return leads.value.filter((lead) => riskOf(lead.id))
+  return leads.value
+})
+
+function toggleFilter(kind) {
+  riskFilter.value = riskFilter.value === kind ? '' : kind
+}
+
+async function loadPool() {
+  try {
+    pool.value = await listPool()
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
+async function loadReminders() {
+  try {
+    const items = await listReminders()
+    const map = {}
+    for (const item of items) map[item.lead_id] = item
+    reminders.value = map
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
+// 认领：负责人靠弹窗录入，能不能认领由后端判定（409 时这里显示中文原因）。
+async function claim(lead) {
+  const owner = window.prompt(`填写「${lead.name}」的负责人`, '')
+  if (owner === null) return
+  if (owner.trim() === '') {
+    error.value = '归属人不能为空'
+    return
+  }
+
+  busyId.value = lead.id
+  error.value = ''
+  try {
+    await claimLead(lead.id, owner.trim())
+    await load()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    busyId.value = ''
+  }
+}
+
+async function release(lead) {
+  busyId.value = lead.id
+  error.value = ''
+  try {
+    await releaseLead(lead.id)
+    await load()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    busyId.value = ''
+  }
+}
+
 // 事实相关的中文名：字段名、来源徽标、异议枚举都只做显示翻译，不复制后端规则。
 function factFieldLabel(field) {
   const hit = FACT_FIELDS.find((item) => item.value === field)
@@ -164,6 +251,8 @@ async function load() {
   error.value = ''
   try {
     leads.value = await listLeads()
+    await loadPool()
+    await loadReminders()
   } catch (err) {
     error.value = err.message
   } finally {
@@ -481,25 +570,53 @@ onMounted(async () => {
 
     <section class="card">
       <h2>线索列表</h2>
+      <div class="filters">
+        <button
+          type="button"
+          class="chip"
+          :class="{ active: riskFilter === 'pool' }"
+          @click="toggleFilter('pool')"
+        >
+          公海 {{ poolCount }} 条
+        </button>
+        <button
+          type="button"
+          class="chip"
+          :class="{ active: riskFilter === 'reminded' }"
+          @click="toggleFilter('reminded')"
+        >
+          有提醒 {{ remindedCount }} 条
+        </button>
+      </div>
       <p v-if="loading" class="hint">加载中…</p>
-      <p v-else-if="leads.length === 0" class="hint">还没有线索，先在上方新增一条。</p>
+      <p v-else-if="visibleLeads.length === 0" class="hint">
+        {{ leads.length === 0 ? '还没有线索，先在上方新增一条。' : '当前筛选下没有线索。' }}
+      </p>
       <table v-else>
         <thead>
           <tr>
             <th>名称</th>
             <th>来源</th>
             <th>归属</th>
+            <th>风险</th>
             <th>阶段</th>
             <th>创建时间</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
-          <template v-for="lead in leads" :key="lead.id">
+          <template v-for="lead in visibleLeads" :key="lead.id">
             <tr>
               <td>{{ lead.name }}</td>
               <td>{{ sourceLabel(lead.source) }}</td>
               <td>{{ lead.owner || '未分配' }}</td>
+              <td>
+                <span v-if="riskOf(lead.id)" class="risk" :title="riskOf(lead.id).message">
+                  <span class="risk-dot" :class="riskOf(lead.id).level"></span>
+                  {{ riskLabel(riskOf(lead.id).level) }}
+                </span>
+                <span v-else class="muted">无</span>
+              </td>
               <td>{{ stageLabel(lead) }}</td>
               <td>{{ formatTime(lead.created_at) }}</td>
               <td class="actions">
@@ -514,11 +631,31 @@ onMounted(async () => {
                 <button type="button" class="ghost" @click="toggleFollowups(lead)">
                   {{ expandedId === lead.id ? '收起' : '记录跟进' }}
                 </button>
+                <button
+                  v-if="!lead.owner"
+                  type="button"
+                  class="ghost"
+                  :disabled="busyId === lead.id"
+                  :title="riskOf(lead.id) ? riskOf(lead.id).message : '从公海认领到某人名下'"
+                  @click="claim(lead)"
+                >
+                  认领
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  class="ghost"
+                  :disabled="busyId === lead.id"
+                  title="放回公海，其他人可以再认领"
+                  @click="release(lead)"
+                >
+                  释放
+                </button>
               </td>
             </tr>
 
             <tr v-if="expandedId === lead.id" class="expand">
-              <td colspan="6">
+              <td colspan="7">
                 <div class="followup-form">
                   <label>
                     结论
@@ -733,6 +870,38 @@ onMounted(async () => {
               </td>
             </tr>
           </template>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>公海 <span class="muted">（{{ poolCount }} 条未分配）</span></h2>
+      <p v-if="pool.length === 0" class="hint">公海是空的：每条线索都有人负责。</p>
+      <table v-else>
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>来源</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="lead in pool" :key="lead.id">
+            <td>{{ lead.name }}</td>
+            <td>{{ sourceLabel(lead.source) }}</td>
+            <td>{{ formatTime(lead.created_at) }}</td>
+            <td class="actions">
+              <button
+                type="button"
+                :disabled="busyId === lead.id"
+                :title="riskOf(lead.id) ? riskOf(lead.id).message : '认领到自己名下'"
+                @click="claim(lead)"
+              >
+                认领
+              </button>
+            </td>
+          </tr>
         </tbody>
       </table>
     </section>
@@ -1016,5 +1185,45 @@ details.inline > summary {
   background: #fff0ef;
   color: #a40e26;
   font-size: 14px;
+}
+.filters {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.chip {
+  padding: 4px 12px;
+  border: 1px solid #c8d8f5;
+  border-radius: 12px;
+  background: #fff;
+  color: #1f6feb;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip.active {
+  background: #e7f0ff;
+  border-color: #1f6feb;
+}
+.risk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.risk-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.risk-dot.red {
+  background: #cf222e;
+}
+.risk-dot.yellow {
+  background: #d4a72c;
+}
+.risk-dot.gray {
+  background: #8a939d;
 }
 </style>

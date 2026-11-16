@@ -147,6 +147,32 @@ def _validate_one(index: int, candidate: object) -> tuple[_Candidate | None, lis
     )
 
 
+def dedupe_candidates(
+    passed: list[tuple[int, dict]],
+) -> tuple[list[tuple[int, dict]], list[ValidationIssue]]:
+    """同一次提炼里同字段多条候选：只保留最后一条，其余记为 skipped。
+
+    为什么保留最后一条：模型对同一字段给出多个值时，后面的通常是对前面的一次修正
+    （同一段原文里「先嫌贵、后说没效果」，以最后说法为准）。位置写成
+    `candidates[i].<字段名>`，指回模型原始输出的第几条，方便复核被舍掉的那条。
+    """
+    kept_order: dict[str, int] = {}
+    for order, (_, candidate) in enumerate(passed):
+        kept_order[candidate["field"]] = order
+
+    kept: list[tuple[int, dict]] = []
+    issues: list[ValidationIssue] = []
+    for order, (index, candidate) in enumerate(passed):
+        field = candidate["field"]
+        if kept_order[field] == order:
+            kept.append((index, candidate))
+        else:
+            issues.append(
+                ValidationIssue(f"candidates[{index}].{field}", "同字段重复，保留最后一条")
+            )
+    return kept, issues
+
+
 def decide_merge(
     existing: Fact | None,
     candidate: dict,
@@ -160,7 +186,9 @@ def decide_merge(
     三条分支：
     - 已有事实被人工锁定 → 不写（"人工锁定，跳过"）；
     - 已有事实的值与候选相同 → 不写（"重复值"）；
-    - 其余 → 写（"ok"）；已有事实未锁定时，调用方应把新值写回同一字段（原地更新）。
+    - 其余 → 写（"ok"）：已有事实未锁定时，调用方必须把新值写回**同一条**
+      （`id=existing.id`），且 `value / source_span / raw_id / at / confidence / source`
+      六项一起覆盖——一个客户一个字段只留一条「当前事实」，历史靠 raw_items + extract_runs 追溯。
     """
     if existing is not None and existing.locked:
         return None, "人工锁定，跳过"

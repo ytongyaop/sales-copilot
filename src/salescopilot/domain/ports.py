@@ -7,6 +7,7 @@ from typing import Protocol
 
 from salescopilot.domain.knowledge import Chunk
 from salescopilot.domain.models import (
+    AssignmentEvent,
     Draft,
     DraftResult,
     ExtractionResult,
@@ -20,7 +21,7 @@ from salescopilot.domain.models import (
 
 
 class LeadRepository(Protocol):
-    """线索仓储端口：写一条、按时间倒序列全部、按 id 查单条、改当前阶段。"""
+    """线索仓储端口：写一条、按时间倒序列全部、按 id 查单条、改当前阶段、改归属人。"""
 
     def add(self, lead: Lead) -> None: ...
 
@@ -29,6 +30,16 @@ class LeadRepository(Protocol):
     def get(self, lead_id: str) -> Lead | None: ...
 
     def update_stage(self, lead_id: str, stage: str) -> None: ...
+
+    def update_owner(self, lead_id: str, owner: str | None) -> None: ...
+
+
+class AssignmentEventRepository(Protocol):
+    """归属事件端口：只追加、按线索按时间正序回查。"""
+
+    def add(self, event: AssignmentEvent) -> None: ...
+
+    def list_for(self, lead_id: str) -> list[AssignmentEvent]: ...
 
 
 class StageEventRepository(Protocol):

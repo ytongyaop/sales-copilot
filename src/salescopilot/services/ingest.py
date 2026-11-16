@@ -20,6 +20,7 @@ from salescopilot.domain.facts import (
     ALLOWED_FACT_FIELDS,
     MAX_FACT_VALUE_LEN,
     decide_merge,
+    dedupe_candidates,
     validate_candidates_indexed,
 )
 from salescopilot.domain.models import ExtractRun, Fact, RawItem
@@ -120,7 +121,7 @@ class IngestService:
     # ------------------------------------------------------------------ 提炼
 
     def extract(self, raw_id: str) -> ExtractOutcome:
-        """对一条原始素材跑一次提炼：校验候选 → 逐条合并 → 落库 → 记账。"""
+        """对一条原始素材跑一次提炼：校验候选 → 同字段去重 → 逐条合并 → 落库 → 记账。"""
         raw = self._raws.get(raw_id)
         if raw is None:
             return ExtractOutcome(
@@ -136,12 +137,13 @@ class IngestService:
 
         candidates = result.candidates
         passed, problems = validate_candidates_indexed(candidates)
+        kept, duplicates = dedupe_candidates(passed)
 
         accepted: list[Fact] = []
-        skipped: list[ValidationIssue] = list(problems)
+        skipped: list[ValidationIssue] = [*problems, *duplicates]
         now = self._clock()
 
-        for index, candidate in passed:
+        for index, candidate in kept:
             existing = self._facts.get_by_field(raw.lead_id, candidate["field"])
             fact, reason = decide_merge(
                 existing, candidate, lead_id=raw.lead_id, raw_id=raw_id, at=now

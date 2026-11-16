@@ -16,6 +16,7 @@ from pathlib import Path
 
 from salescopilot.domain.models import (
     DEFAULT_TEMPLATE,
+    AssignmentEvent,
     Draft,
     ExtractRun,
     Fact,
@@ -99,6 +100,14 @@ CREATE TABLE IF NOT EXISTS drafts (
     seconds REAL NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS assignment_events (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    from_owner TEXT,
+    to_owner TEXT,
+    reason TEXT NOT NULL,
+    at TEXT NOT NULL
+);
 """
 
 _LEADS_COLUMNS = (
@@ -116,6 +125,7 @@ _SELECT_LEAD = (
     "SELECT id, name, contact, source, stage, owner, created_at, template, fields_json FROM leads"
 )
 _SELECT_EVENT = "SELECT id, lead_id, from_stage, to_stage, at FROM stage_history"
+_SELECT_ASSIGNMENT = "SELECT id, lead_id, from_owner, to_owner, reason, at FROM assignment_events"
 _SELECT_FOLLOWUP = "SELECT id, lead_id, conclusion, objection, next_followup_at, at FROM followups"
 _SELECT_RAW = "SELECT id, lead_id, source, content, content_hash, at FROM raw_items"
 _SELECT_FACT = (
@@ -196,6 +206,11 @@ class SqliteLeadRepository(_SqliteRepository):
         with self._open() as conn:
             conn.execute("UPDATE leads SET stage = ? WHERE id = ?", (stage, lead_id))
 
+    def update_owner(self, lead_id: str, owner: str | None) -> None:
+        """只改归属人；传 None 即回公海。能不能认领/释放由 `domain/assignment.py` 判定。"""
+        with self._open() as conn:
+            conn.execute("UPDATE leads SET owner = ? WHERE id = ?", (owner, lead_id))
+
     @staticmethod
     def _to_lead(row: sqlite3.Row) -> Lead:
         return Lead(
@@ -235,6 +250,44 @@ class SqliteStageEventRepository(_SqliteRepository):
                 lead_id=row["lead_id"],
                 from_stage=row["from_stage"],
                 to_stage=row["to_stage"],
+                at=row["at"],
+            )
+            for row in rows
+        ]
+
+
+class SqliteAssignmentEventRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `AssignmentEventRepository` 的 SQLite 实现（只追加）。"""
+
+    def add(self, event: AssignmentEvent) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO assignment_events (id, lead_id, from_owner, to_owner, reason, at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    event.id,
+                    event.lead_id,
+                    event.from_owner,
+                    event.to_owner,
+                    event.reason,
+                    event.at,
+                ),
+            )
+
+    def list_for(self, lead_id: str) -> list[AssignmentEvent]:
+        """按 `at` 正序；同一秒内按写入顺序（rowid）兜底。"""
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_ASSIGNMENT} WHERE lead_id = ? ORDER BY at ASC, rowid ASC",
+                (lead_id,),
+            ).fetchall()
+        return [
+            AssignmentEvent(
+                id=row["id"],
+                lead_id=row["lead_id"],
+                from_owner=row["from_owner"],
+                to_owner=row["to_owner"],
+                reason=row["reason"],
                 at=row["at"],
             )
             for row in rows
@@ -380,12 +433,17 @@ class SqliteFactRepository(_SqliteRepository):
         return None if row is None else self._to_fact(row)
 
     def update(self, fact: Fact) -> None:
-        """整条改（值 / 来源 / 片段 / 置信度 / 锁定 / 时间）；按 id 定位。"""
+        """整条改（值 / 原文编号 / 来源 / 片段 / 置信度 / 锁定 / 时间）；按 id 定位。
+
+        `raw_id` 必须一起改：一条字段的「当前事实」换了出处，追溯就要指到新的那条原文；
+        漏掉它会让 UI 与账本对不上「这个值到底是哪段话提炼出来的」。
+        """
         with self._open() as conn:
             conn.execute(
-                "UPDATE facts SET value = ?, source = ?, source_span = ?, confidence = ?, "
-                "locked = ?, at = ? WHERE id = ?",
+                "UPDATE facts SET raw_id = ?, value = ?, source = ?, source_span = ?, "
+                "confidence = ?, locked = ?, at = ? WHERE id = ?",
                 (
+                    fact.raw_id,
                     fact.value,
                     fact.source,
                     fact.source_span,
