@@ -86,7 +86,7 @@ web/              Vue3 + Vite 前端，只通过 HTTP 调后端
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check .                     # 全过（0 问题）
-.venv\Scripts\python.exe -m pytest -q                        # 220 passed
+.venv\Scripts\python.exe -m pytest -q                        # 247 passed
 $env:PYTHONPATH='src'; .venv\Scripts\lint-imports.exe        # 3 kept, 0 broken
 .venv\Scripts\python.exe -m pytest -q tests\test_no_industry_words.py   # 引擎不含行业词
 .venv\Scripts\python.exe -m pytest -q tests\test_templates.py::test_removing_appointment_breaks_edu_only
