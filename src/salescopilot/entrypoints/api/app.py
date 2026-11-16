@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from salescopilot.domain.dashboard import Dashboard
 from salescopilot.domain.labels import block_label
 from salescopilot.domain.models import (
     DEFAULT_TEMPLATE,
@@ -28,9 +29,11 @@ from salescopilot.domain.reminders import Reminder
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.entrypoints.bootstrap import (
     build_assignment_service,
+    build_dashboard_service,
     build_draft_service,
     build_flow_service,
     build_followup_service,
+    build_import_service,
     build_ingest_service,
     build_lead_service,
     build_reclaim_service,
@@ -40,9 +43,11 @@ from salescopilot.entrypoints.bootstrap import (
     templates,
 )
 from salescopilot.services.assignment import AssignmentService
+from salescopilot.services.dashboard import DashboardService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
+from salescopilot.services.import_service import ImportService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
@@ -67,6 +72,8 @@ FIELD_LABELS = {
     "lead_id": "线索",
     "content": "内容",
     "value": "取值",
+    "csv_text": "CSV 内容",
+    "default_owner": "默认归属人",
 }
 
 
@@ -120,6 +127,13 @@ class ClaimIn(BaseModel):
     owner: str
 
 
+class ImportIn(BaseModel):
+    """POST /leads/import 的请求体：CSV 原文 + 可选的默认归属人。"""
+
+    csv_text: str
+    default_owner: str | None = None
+
+
 def get_lead_service() -> Iterator[LeadService]:
     """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
 
@@ -156,6 +170,14 @@ def get_reclaim_service() -> Iterator[ReclaimService]:
     yield build_reclaim_service()
 
 
+def get_dashboard_service() -> Iterator[DashboardService]:
+    yield build_dashboard_service()
+
+
+def get_import_service() -> Iterator[ImportService]:
+    yield build_import_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -164,6 +186,8 @@ DraftDep = Annotated[DraftService, Depends(get_draft_service)]
 AssignmentDep = Annotated[AssignmentService, Depends(get_assignment_service)]
 ReminderDep = Annotated[ReminderService, Depends(get_reminder_service)]
 ReclaimDep = Annotated[ReclaimService, Depends(get_reclaim_service)]
+DashboardDep = Annotated[DashboardService, Depends(get_dashboard_service)]
+ImportDep = Annotated[ImportService, Depends(get_import_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -261,6 +285,20 @@ def _reminder_body(reminder: Reminder, *, lead_name: str) -> dict:
     }
 
 
+def _dashboard_body(dashboard: Dashboard) -> dict:
+    """把指标实体映射成 JSON：浮点保留 4 位（前端只负责显示百分比）。"""
+    return {
+        "total": dashboard.total,
+        "pool": dashboard.pool,
+        "new_this_week": dashboard.new_this_week,
+        "followups_this_week": dashboard.followups_this_week,
+        "first_response_24h_rate": round(dashboard.first_response_24h_rate, 4),
+        "stale_ratio": round(dashboard.stale_ratio, 4),
+        "silent_count": dashboard.silent_count,
+        "reminders_by_level": dict(dashboard.reminders_by_level),
+    }
+
+
 def _assignment_status(issues: list[ValidationIssue]) -> int:
     """归属接口的状态码：没有这条线索 404、状态冲突（已归属/尚未归属）409、其余入参问题 422。"""
     if any(issue.location == "lead_id" for issue in issues):
@@ -353,6 +391,15 @@ def list_leads(service: LeadDep) -> list[dict]:
     return [_lead_body(lead) for lead in service.list()]
 
 
+@app.post("/leads/import")
+def import_leads(payload: ImportIn, service: ImportDep) -> dict:
+    """CSV 导入：返回 `{"imported", "skipped"}`；同联系方式已存在则跳过（幂等）。
+
+    缺字段、来源不合法的行只记入 `skipped`，不会让整批导入失败。
+    """
+    return service.import_csv(payload.csv_text, default_owner=payload.default_owner)
+
+
 @app.get("/leads/pool")
 def list_lead_pool(service: AssignmentDep) -> list[dict]:
     """公海：没有归属人的线索，按创建时间倒序；空表返回 `[]`。"""
@@ -390,13 +437,25 @@ def list_reminders(service: ReminderDep) -> list[dict]:
 
 
 @app.get("/leads/{lead_id}/reminders")
-def list_lead_reminders(lead_id: str, service: ReminderDep) -> list[dict]:
-    """该线索的提醒；线索不存在或没有提醒都返回 `[]`。"""
+def list_lead_reminders(lead_id: str, service: ReminderDep):
+    """该线索的提醒；线索不存在 404，存在但没有提醒返回 `[]`。"""
+    items = service.for_lead(lead_id)
+    if items is None:
+        return JSONResponse(
+            status_code=404,
+            content={"issues": [{"location": "lead_id", "message": "线索不存在"}]},
+        )
     names = service.lead_names()
-    return [
-        _reminder_body(item, lead_name=names.get(item.lead_id, ""))
-        for item in service.for_lead(lead_id)
-    ]
+    return [_reminder_body(item, lead_name=names.get(item.lead_id, "")) for item in items]
+
+
+@app.get("/dashboard")
+def dashboard_summary(service: DashboardDep) -> dict:
+    """一屏指标：总数 / 公海 / 本周新增与跟进 / 首响率 / 无下次跟进占比 / 分级提醒数。
+
+    口径全部写在 `domain/dashboard.py` 的字段注释里；这里只做浮点保留 4 位的格式转换。
+    """
+    return _dashboard_body(service.summary())
 
 
 @app.post("/reclaim/scan")

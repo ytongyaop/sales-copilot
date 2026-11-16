@@ -65,6 +65,19 @@ export function listReminders() {
   return request('/reminders')
 }
 
+// 仪表盘：后端算好的指标（口径写在 domain/dashboard.py），前端只负责显示，不复制计算规则。
+export function getDashboard() {
+  return request('/dashboard')
+}
+
+// CSV 导入：原文交给后端解析与去重（同一联系方式幂等跳过），前端不做第二套规则。
+export function importLeads(csvText, defaultOwner) {
+  return request(
+    '/leads/import',
+    jsonOptions('POST', { csv_text: csvText, default_owner: defaultOwner || null }),
+  )
+}
+
 // 运行模式：演示前先确认后端是真模型还是假模型（假模型的数据不能当真实结论）。
 export function getHealth() {
   return request('/health')

@@ -100,6 +100,7 @@ def _candidates(
 ) -> list[Reminder]:
     """一条线索的全部候选提醒（可能有三类），后续再取最严重的一条。"""
     first_minutes = _number(thresholds, "first_response_minutes")
+    feedback_hours = _number(thresholds, "feedback_window_hours")
     stale_days = _number(thresholds, "stale_followup_days")
     created = parse_moment(lead.created_at)
     latest = _latest(items)
@@ -121,6 +122,11 @@ def _candidates(
             )
 
     # 2. 反馈窗口（黄）／没有下次跟进时间（灰）：都看最近一次跟进。
+    #
+    # 反馈窗口口径：「约定时间 = next_followup_at 的日期 00:00 + feedback_window_hours 小时」，
+    # 过了这个截止时间仍没有更晚的跟进记录 → 黄。
+    # 最近一次跟进本身就是最新那条，所以「之后没有新跟进」等价于「它约定的截止时间已过」；
+    # 小时数只来自模板阈值，缺键就整条规则跳过（不在代码里兜底 0 小时）。
     if latest is not None:
         agreed = _as_date(latest.next_followup_at)
         if agreed is None:
@@ -134,17 +140,19 @@ def _candidates(
                     _minutes_since(baseline, now),
                 )
             )
-        elif now.date() > agreed:
-            days = (now.date() - agreed).days
-            out.append(
-                Reminder(
-                    lead.id,
-                    FEEDBACK_WINDOW,
-                    "yellow",
-                    f"约定时间已过 {days} 天未更新",
-                    _minutes_since(datetime.combine(agreed, time.min, UTC), now),
+        elif feedback_hours is not None:
+            deadline = datetime.combine(agreed, time.min, UTC) + timedelta(hours=feedback_hours)
+            if now > deadline:
+                days = (now.date() - agreed).days
+                out.append(
+                    Reminder(
+                        lead.id,
+                        FEEDBACK_WINDOW,
+                        "yellow",
+                        f"约定时间已过 {days} 天未更新",
+                        _minutes_since(deadline, now),
+                    )
                 )
-            )
 
     # 3. 久未新增跟进（灰）：以最后一次跟进（没有就跟创建时间）为起点。
     if stale_days is not None:

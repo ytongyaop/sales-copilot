@@ -105,7 +105,13 @@ def test_reminders_list_and_per_lead(client: TestClient, tmp_path: Path) -> None
 
     # 新线索刚建、什么都没发生 → 单线索提醒是空的
     assert client.get(f"/leads/{fresh['id']}/reminders").json() == []
-    assert client.get("/leads/missing/reminders").json() == []
+
+    # 线索不存在 → 404 + 中文原因（不再用 200 + 空列表掩盖「查错了 id」）
+    missing = client.get("/leads/missing/reminders")
+    assert missing.status_code == 404
+    assert missing.json() == {
+        "issues": [{"location": "lead_id", "message": "线索不存在"}],
+    }
 
 
 def test_reclaim_scan_reclaims_overdue_lead_only_once(client: TestClient, tmp_path: Path) -> None:

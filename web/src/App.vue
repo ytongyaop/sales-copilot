@@ -10,7 +10,9 @@ import {
   createRaw,
   discardDraft,
   extractRaw,
+  getDashboard,
   getHealth,
+  importLeads,
   listFacts,
   listFollowups,
   listLeads,
@@ -56,6 +58,16 @@ const LEVEL_LABELS = { red: '红', yellow: '黄', gray: '灰' }
 // 后端 /health 给的运行模式：真心模型还是假模型，必须在顶部一眼看出来——
 // 假模型（演示数据不可信）的草稿与事实不能当成真实结论。
 const health = ref(null)
+
+// 仪表盘：全部数字由后端 /dashboard 算好，前端只做显示（不复制口径）。
+const dashboard = ref(null)
+const dashboardError = ref('')
+
+// CSV 导入：选文件 → 读文本 → POST 给后端；结果只在这里显示，失败不白屏。
+const importing = ref(false)
+const importResult = ref(null)
+const importError = ref('')
+const fileInput = ref(null)
 
 function modeLabel() {
   return health.value && health.value.mode === 'live'
@@ -168,6 +180,22 @@ async function loadReminders() {
   }
 }
 
+// 仪表盘：单独 try，失败只影响这一块（不把整个列表拖成白屏）。
+async function loadDashboard() {
+  try {
+    dashboard.value = await getDashboard()
+    dashboardError.value = ''
+  } catch (err) {
+    dashboard.value = null
+    dashboardError.value = err.message
+  }
+}
+
+function formatRate(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '-'
+  return `${(value * 100).toFixed(1)}%`
+}
+
 // 认领：负责人靠弹窗录入，能不能认领由后端判定（409 时这里显示中文原因）。
 async function claim(lead) {
   const owner = window.prompt(`填写「${lead.name}」的负责人`, '')
@@ -253,6 +281,7 @@ async function load() {
     leads.value = await listLeads()
     await loadPool()
     await loadReminders()
+    await loadDashboard()
   } catch (err) {
     error.value = err.message
   } finally {
@@ -295,6 +324,38 @@ async function submit() {
     error.value = err.message
   } finally {
     submitting.value = false
+  }
+}
+
+// -------------------------------------------------------------- CSV 导入
+// 前端只负责读文本；字段校验、来源别名、联系方式去重全在后端（幂等口径只在一处）。
+function readFileText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('读取文件失败，请确认这是一个文本 CSV 文件'))
+    reader.readAsText(file, 'utf-8')
+  })
+}
+
+async function onImportFile(event) {
+  const input = event.target
+  const file = input.files && input.files[0]
+  if (!file) return
+
+  importError.value = ''
+  importResult.value = null
+  importing.value = true
+  try {
+    const text = await readFileText(file)
+    importResult.value = await importLeads(text, null)
+    // 导入成功后同步刷新列表与仪表盘，数字与列表不会互相打架。
+    await load()
+  } catch (err) {
+    importError.value = err.message || '导入失败，请重试'
+  } finally {
+    importing.value = false
+    input.value = ''
   }
 }
 
@@ -530,6 +591,50 @@ onMounted(async () => {
     </header>
 
     <section class="card">
+      <h2>仪表盘</h2>
+      <p v-if="dashboardError" class="error">{{ dashboardError }}</p>
+      <p v-else-if="!dashboard" class="hint">仪表盘加载中…</p>
+      <div v-else class="stats">
+        <div class="stat">
+          <span class="stat-value">{{ dashboard.total }}</span>
+          <span class="stat-label">线索总数</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value">{{ dashboard.pool }}</span>
+          <span class="stat-label">公海</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value">{{ dashboard.new_this_week }}</span>
+          <span class="stat-label">本周新增</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value">{{ dashboard.followups_this_week }}</span>
+          <span class="stat-label">本周跟进</span>
+        </div>
+        <div class="stat small">
+          <span class="stat-value">{{ formatRate(dashboard.first_response_24h_rate) }}</span>
+          <span class="stat-label">24h 首联率</span>
+        </div>
+        <div class="stat small">
+          <span class="stat-value">{{ formatRate(dashboard.stale_ratio) }}</span>
+          <span class="stat-label">无下次跟进占比</span>
+        </div>
+      </div>
+      <div v-if="dashboard" class="reminder-counts">
+        <span class="risk">
+          <span class="risk-dot red"></span>红 {{ dashboard.reminders_by_level.red }}
+        </span>
+        <span class="risk">
+          <span class="risk-dot yellow"></span>黄 {{ dashboard.reminders_by_level.yellow }}
+        </span>
+        <span class="risk">
+          <span class="risk-dot gray"></span>灰 {{ dashboard.reminders_by_level.gray }}
+        </span>
+        <span class="muted">久未新增跟进 {{ dashboard.silent_count }} 条</span>
+      </div>
+    </section>
+
+    <section class="card">
       <h2>新增线索</h2>
       <form class="form" @submit.prevent="submit">
         <label>
@@ -566,6 +671,38 @@ onMounted(async () => {
       </form>
 
       <p v-if="error" class="error">{{ error }}</p>
+    </section>
+
+    <section class="card">
+      <h2>导入 CSV</h2>
+      <p class="hint">
+        支持带表头（姓名 / 联系方式 / 来源 / 归属），也支持无表头（列序：姓名,联系方式,来源,归属）；
+        来源可填英文键或中文别名；同一联系方式只会导入一次。
+      </p>
+      <div class="row-actions">
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".csv,text/csv"
+          :disabled="importing"
+          @change="onImportFile"
+        />
+        <span v-if="importing" class="muted">导入中…</span>
+      </div>
+      <p v-if="importError" class="error">{{ importError }}</p>
+      <div v-if="importResult" class="import-result">
+        <p>
+          导入 {{ importResult.imported }} 条，跳过 {{ importResult.skipped.length }} 条。
+        </p>
+        <details v-if="importResult.skipped.length">
+          <summary class="muted">查看跳过原因</summary>
+          <ul class="skip-list">
+            <li v-for="(item, index) in importResult.skipped" :key="index" class="muted">
+              第 {{ item.row }} 行：{{ item.reason }}
+            </li>
+          </ul>
+        </details>
+      </div>
     </section>
 
     <section class="card">
@@ -1204,6 +1341,50 @@ details.inline > summary {
 .chip.active {
   background: #e7f0ff;
   border-color: #1f6feb;
+}
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+.stat.small {
+  background: #fff;
+}
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+}
+.stat.small .stat-value {
+  font-size: 16px;
+}
+.stat-label {
+  font-size: 12px;
+  color: #57606a;
+}
+.reminder-counts {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 12px;
+  font-size: 13px;
+}
+.import-result {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  background: #fafbfc;
+  font-size: 14px;
 }
 .risk {
   display: inline-flex;

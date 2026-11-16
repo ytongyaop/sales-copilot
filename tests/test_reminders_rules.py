@@ -90,6 +90,19 @@ def test_feedback_window_turns_yellow_after_agreed_date() -> None:
     assert reminder.message == "约定时间已过 4 天未更新"
 
 
+def test_feedback_window_hours_participates_in_decision() -> None:
+    """同一数据只改 feedback_window_hours：0 小时 → 黄；48 小时 → 截止未到，提醒消失。"""
+    lead = _lead(stage="qualify", created_at="2026-11-15T08:00:00+00:00")
+    followup = _followup(at="2026-11-15T09:00:00+00:00", next_followup_at="2026-11-15")
+
+    zero_hours = _remind([lead], [followup], _template(feedback_window_hours=0))
+    assert [item.kind for item in zero_hours] == [FEEDBACK_WINDOW]
+    assert zero_hours[0].message == "约定时间已过 1 天未更新"
+
+    # 48 小时窗口：截止时间是 11-17 00:00，now 是 11-16 12:00，还没到 → 不提醒
+    assert _remind([lead], [followup], _template(feedback_window_hours=48)) == []
+
+
 def test_missing_next_followup_at_turns_gray() -> None:
     """最近一次跟进没填下次跟进时间 → 灰灯「没有下次跟进时间」。"""
     reminders = _remind(

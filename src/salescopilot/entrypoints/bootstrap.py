@@ -49,9 +49,11 @@ from salescopilot.domain.ports import (
 )
 from salescopilot.domain.rules import validate_template
 from salescopilot.services.assignment import AssignmentService
+from salescopilot.services.dashboard import DashboardService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
+from salescopilot.services.import_service import ImportService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.knowledge import KnowledgeService
 from salescopilot.services.leads import LeadService
@@ -134,6 +136,20 @@ def build_reclaim_service() -> ReclaimService:
     leads: LeadRepository = SqliteLeadRepository(db)
     events: AssignmentEventRepository = SqliteAssignmentEventRepository(db)
     return ReclaimService(leads, events, template_loader)
+
+
+def build_dashboard_service() -> DashboardService:
+    """仪表盘用例：线索 + 跟进仓储 + 模板加载器（指标口径取默认模板的阈值）。"""
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    followups: FollowupRepository = SqliteFollowupRepository(db)
+    return DashboardService(leads, followups, template_loader)
+
+
+def build_import_service() -> ImportService:
+    """CSV 导入用例：线索仓储（去重与落库都由这个用例负责）。"""
+    leads: LeadRepository = SqliteLeadRepository(default_db_path())
+    return ImportService(leads)
 
 
 def build_extractor(live: bool | None = None) -> FactExtractor:

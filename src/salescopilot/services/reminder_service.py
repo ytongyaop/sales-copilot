@@ -51,11 +51,11 @@ class ReminderService:
             reminders.extend(self._for(lead, now))
         return sorted(reminders, key=lambda item: (-SEVERITY[item.level], item.lead_id))
 
-    def for_lead(self, lead_id: str) -> list[Reminder]:
-        """该线索的提醒；线索不存在或模板未知时返回空列表（路由据此给 200 + 空）。"""
+    def for_lead(self, lead_id: str) -> list[Reminder] | None:
+        """该线索的提醒；线索不存在返回 `None`（路由据此给 404），存在但没有提醒返回空列表。"""
         lead = self._leads.get(lead_id)
         if lead is None:
-            return []
+            return None
         return self._for(lead, _as_now(self._clock()))
 
     def lead_names(self) -> dict[str, str]:
