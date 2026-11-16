@@ -21,7 +21,7 @@ from salescopilot.domain.models import (
 
 
 class LeadRepository(Protocol):
-    """线索仓储端口：写一条、按时间倒序列全部、按 id 查单条、改当前阶段、改归属人。"""
+    """线索仓储端口：写一条、按时间倒序列全部、按 id 查单条、改阶段、改归属人、整份改字段。"""
 
     def add(self, lead: Lead) -> None: ...
 
@@ -32,6 +32,8 @@ class LeadRepository(Protocol):
     def update_stage(self, lead_id: str, stage: str) -> None: ...
 
     def update_owner(self, lead_id: str, owner: str | None) -> None: ...
+
+    def update_fields(self, lead_id: str, fields: dict[str, str]) -> None: ...
 
 
 class AssignmentEventRepository(Protocol):

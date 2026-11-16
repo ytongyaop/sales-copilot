@@ -31,10 +31,13 @@ def test_post_lead_returns_201_with_all_fields(client: TestClient) -> None:
         "owner",
         "created_at",
         "template",
+        "fields",
     }
     assert body["name"] == VALID["name"]
     assert body["stage"] == "intake"
     assert body["owner"] == VALID["owner"]
+    # 新线索还没有任何已采集字段（前端据此算「还缺什么」）
+    assert body["fields"] == {}
 
 
 def test_post_lead_missing_name_returns_422_with_issues(client: TestClient) -> None:

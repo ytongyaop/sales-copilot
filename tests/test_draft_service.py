@@ -181,12 +181,10 @@ def test_confirm_without_next_date_is_rejected(tmp_path: Path) -> None:
     _add_fact(facts)
     outcome, _ = service.generate("lead-1")
 
-    item, issues = service.confirm(
-        "lead-1", outcome.draft_id, objection="price", next_followup_at=""
-    )
+    result = service.confirm("lead-1", outcome.draft_id, objection="price", next_followup_at="")
 
-    assert item is None
-    assert any(issue.location == "next_followup_at" for issue in issues)
+    assert result.item is None
+    assert any(issue.location == "next_followup_at" for issue in result.issues)
 
 
 def test_confirm_writes_followup_with_draft_text_as_conclusion(tmp_path: Path) -> None:
@@ -194,16 +192,16 @@ def test_confirm_writes_followup_with_draft_text_as_conclusion(tmp_path: Path) -
     _add_fact(facts)
     outcome, _ = service.generate("lead-1")
 
-    item, issues = service.confirm(
+    result = service.confirm(
         "lead-1", outcome.draft_id, objection="price", next_followup_at="2026-11-20"
     )
 
-    assert issues == []
-    assert item is not None
-    assert item.conclusion == outcome.text
-    assert item.objection == "price"
-    assert item.next_followup_at == "2026-11-20"
-    assert [record.id for record in followups.list_for("lead-1")] == [item.id]
+    assert result.issues == []
+    assert result.item is not None
+    assert result.item.conclusion == outcome.text
+    assert result.item.objection == "price"
+    assert result.item.next_followup_at == "2026-11-20"
+    assert [record.id for record in followups.list_for("lead-1")] == [result.item.id]
 
     saved = drafts.get(outcome.draft_id)
     assert saved is not None and saved.status == "confirmed"
@@ -219,20 +217,18 @@ def test_confirm_after_discard_is_rejected(tmp_path: Path) -> None:
     assert discarded is not None
     assert drafts.get(outcome.draft_id).status == "discarded"
 
-    item, confirm_issues = service.confirm(
+    result = service.confirm(
         "lead-1", outcome.draft_id, objection="price", next_followup_at="2026-11-20"
     )
 
-    assert item is None
-    assert [issue.message for issue in confirm_issues] == ["草稿已确认或已丢弃，不能再次操作"]
+    assert result.item is None
+    assert [issue.message for issue in result.issues] == ["草稿已确认或已丢弃，不能再次操作"]
 
 
 def test_confirm_unknown_draft_is_rejected(tmp_path: Path) -> None:
     service, _, _, _, _ = _service(tmp_path)
 
-    item, issues = service.confirm(
-        "lead-1", "missing", objection="price", next_followup_at="2026-11-20"
-    )
+    result = service.confirm("lead-1", "missing", objection="price", next_followup_at="2026-11-20")
 
-    assert item is None
-    assert [issue.message for issue in issues] == ["草稿不存在"]
+    assert result.item is None
+    assert [issue.message for issue in result.issues] == ["草稿不存在"]

@@ -122,6 +122,11 @@ export function patchFact(leadId, field, value) {
   return request(`/leads/${leadId}/facts/${encodeURIComponent(field)}`, jsonOptions('PATCH', { value }))
 }
 
+// 补线索字段：只发「要补的那几项」，键是否合法、值是否为空全由后端判定。
+export function patchLeadFields(leadId, fields) {
+  return request(`/leads/${leadId}/fields`, jsonOptions('PATCH', { fields }))
+}
+
 // ---------------------------------------------------------------- 原文列表 / 话术草稿
 
 export function listRaws(leadId) {

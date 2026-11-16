@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 
 from salescopilot.domain.models import ALLOWED_OBJECTIONS, Fact
-from salescopilot.domain.rules import ValidationIssue
+from salescopilot.domain.rules import ValidationIssue, is_filled, validate_lead_fields
 
 # 允许的事实字段：通用叫法，任何行业都能用；扩展枚举只改这里。
 ALLOWED_FACT_FIELDS: tuple[str, ...] = (
@@ -20,6 +20,15 @@ ALLOWED_FACT_FIELDS: tuple[str, ...] = (
     "amount",
     "appointment_at",
 )
+
+# 事实字段 → 线索字段（流程推进要用的那个）：只有这些事实能自动补进线索字段。
+# `objection` 不进块契约的必填项，所以不映射；`conclusion` 由「跟进确认」写入，也不来自事实。
+FACT_TO_FIELD: dict[str, str] = {
+    "decision_maker": "decision_maker",
+    "need": "need",
+    "appointment_at": "appointment_at",
+    "amount": "amount",
+}
 
 MAX_FACT_VALUE_LEN = 200
 
@@ -210,3 +219,25 @@ def decide_merge(
         ),
         "ok",
     )
+
+
+def fields_from_facts(facts: list[Fact], current: dict) -> dict:
+    """把当前事实补进线索字段：只填 `current` 里缺的键，已填的一律不动（人填的优先）。
+
+    三条取舍：
+    1. 只映射 `FACT_TO_FIELD` 里的事实字段——异议与结论都不进流程字段；
+    2. 值先过 `validate_lead_fields` 的单字段校验：过不了的（比如约定时间不是
+       `YYYY-MM-DD`）不自动补，留给人工补录，免得一条坏值把整批补丁拖死；
+    3. 返回的是「这次要补的键」，不含已有键；调用方据它合并落库并回报补了哪些字段。
+    """
+    patch: dict[str, str] = {}
+    for fact in facts:
+        target = FACT_TO_FIELD.get(fact.field)
+        if target is None or target in patch:
+            continue
+        if is_filled(current.get(target)):
+            continue
+        if validate_lead_fields({target: fact.value}):
+            continue
+        patch[target] = fact.value.strip()
+    return patch

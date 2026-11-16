@@ -34,7 +34,7 @@ from salescopilot.domain.ports import (
     FollowupRepository,
     LeadRepository,
 )
-from salescopilot.domain.rules import ValidationIssue
+from salescopilot.domain.rules import ValidationIssue, merge_fields, validate_lead_fields
 from salescopilot.services.leads import utc_now_iso
 
 # 每次取几段资料：够模型引用、又不至于把提示词灌满。
@@ -53,6 +53,19 @@ class DraftOutcome:
     text: str
     citations: list[dict]
     model: str
+
+
+@dataclass(frozen=True)
+class ConfirmOutcome:
+    """一次确认的结果：落库的跟进、确认后该线索的字段、以及问题列表。
+
+    `fields` 是写完「结论」之后的完整字段视图（不含线索自身的基础属性）；
+    失败时为 `{}`，调用方不用去查库就知道这次有没有写成。
+    """
+
+    item: Followup | None
+    fields: dict[str, str]
+    issues: list[ValidationIssue]
 
 
 class DraftService:
@@ -137,11 +150,15 @@ class DraftService:
 
     def confirm(
         self, lead_id: str, draft_id: str, *, objection: str, next_followup_at: str
-    ) -> tuple[Followup | None, list[ValidationIssue]]:
-        """把草稿确认成一条跟进留痕：结论就是草稿正文，异议与时间由人补。"""
+    ) -> ConfirmOutcome:
+        """把草稿确认成一条跟进留痕：结论就是草稿正文，异议与时间由人补。
+
+        落库成功后把同一段正文写进线索的 `conclusion` 字段：`close` 块要靠它才推得动，
+        而人要写的就是「这次谈成了什么」——草稿正文正是那句话，不必再手抄一遍。
+        """
         draft, issues = self._resolve_pending(lead_id, draft_id)
         if draft is None:
-            return None, issues
+            return ConfirmOutcome(None, {}, issues)
 
         issues = validate_confirm(
             objection=objection,
@@ -149,10 +166,12 @@ class DraftService:
             conclusion=draft.text,
         )
         if issues:
-            return None, issues
+            return ConfirmOutcome(None, {}, issues)
 
         if self._followups is None:
-            return None, [ValidationIssue("draft", "草稿服务未接入跟进仓储，无法确认")]
+            return ConfirmOutcome(
+                None, {}, [ValidationIssue("draft", "草稿服务未接入跟进仓储，无法确认")]
+            )
 
         item = Followup(
             id=str(uuid.uuid4()),
@@ -164,7 +183,23 @@ class DraftService:
         )
         self._followups.add(item)
         self._drafts.update_status(draft.id, DRAFT_CONFIRMED)
-        return item, []
+        return ConfirmOutcome(item, self._write_conclusion(lead_id, draft.text), [])
+
+    def _write_conclusion(self, lead_id: str, text: str) -> dict[str, str]:
+        """把草稿正文写进线索的 `conclusion` 字段；返回更新后的字段视图。
+
+        正文过不了字段校验（比如超过 200 字）就不写：宁可让推进时提示「缺结论」，
+        也不往字段里塞一条违反 `validate_lead_fields` 的值。
+        """
+        lead = self._leads.get(lead_id)
+        if lead is None:
+            return {}
+        if validate_lead_fields({"conclusion": text}):
+            return dict(lead.fields)
+
+        merged = merge_fields(lead.fields, {"conclusion": text})
+        self._leads.update_fields(lead_id, merged)
+        return merged
 
     # ------------------------------------------------------------------ 丢弃
 

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from salescopilot.domain.blocks import BLOCKS
 from salescopilot.domain.dashboard import Dashboard
 from salescopilot.domain.labels import block_label
 from salescopilot.domain.models import (
@@ -91,6 +92,12 @@ class AdvanceIn(BaseModel):
     """POST /leads/{id}/advance 的请求体：只想推进到哪一步。"""
 
     target_stage: str
+
+
+class LeadFieldsIn(BaseModel):
+    """PATCH /leads/{id}/fields 的请求体：只想补哪几个字段（键由 domain 白名单校验）。"""
+
+    fields: dict[str, str]
 
 
 class FollowupIn(BaseModel):
@@ -195,6 +202,11 @@ def _issue_body(issues: list[ValidationIssue]) -> dict:
 
 
 def _lead_body(lead: Lead) -> dict:
+    """一条线索的完整视图。
+
+    `fields` 是推进时要看的字段（键是块契约的 `requires`），前端据它算「还缺什么」；
+    `contact` / `source` 同时是实体属性，不会重复放进 `fields`。
+    """
     return {
         "id": lead.id,
         "name": lead.name,
@@ -204,6 +216,7 @@ def _lead_body(lead: Lead) -> dict:
         "owner": lead.owner,
         "created_at": lead.created_at,
         "template": lead.template,
+        "fields": dict(lead.fields),
     }
 
 
@@ -339,10 +352,12 @@ def health() -> dict:
 
 
 def _template_body(key: str, data: dict) -> dict:
-    """模板清单的一项：名字 + 阶段顺序 + 每块的中文名。
+    """模板清单的一项：名字 + 阶段顺序 + 每块的中文名 + 每块的必填字段。
 
     中文名先取模板 YAML 里该块的 `label`（行业叫法只允许出现在这里），
     没有才退回 `domain/labels.py` 的通用叫法；两者都没有就用块 id。
+    `requires` 原样透出块契约（`domain/blocks.py`），前端据此算「还缺什么」；
+    判定规则仍只在 `domain/rules.py`，路由不做任何判断。
     """
     steps = [
         step
@@ -350,17 +365,21 @@ def _template_body(key: str, data: dict) -> dict:
         if isinstance(step, dict) and isinstance(step.get("block"), str)
     ]
     labels: dict[str, str] = {}
+    requires: dict[str, list[str]] = {}
     for step in steps:
         block_id = step["block"]
         label = step.get("label")
         labels[block_id] = (
             label if isinstance(label, str) and label.strip() else block_label(block_id)
         )
+        block = BLOCKS.get(block_id)
+        requires[block_id] = [] if block is None else list(block.requires)
     return {
         "key": key,
         "name": str(data.get("name", "")),
         "flow": [step["block"] for step in steps],
         "labels": labels,
+        "requires": requires,
     }
 
 
@@ -387,8 +406,23 @@ def create_lead(payload: LeadIn, service: LeadDep):
 
 @app.get("/leads")
 def list_leads(service: LeadDep) -> list[dict]:
-    """线索列表：按创建时间倒序；空表返回 `[]`。"""
+    """线索列表：按创建时间倒序；空表返回 `[]`。每条都带 `fields`（前端算「还缺什么」）。"""
     return [_lead_body(lead) for lead in service.list()]
+
+
+@app.patch("/leads/{lead_id}/fields")
+def patch_lead_fields(lead_id: str, payload: LeadFieldsIn, service: LeadDep):
+    """人工补录线索字段：成功 200 返回更新后的线索（含 `fields`）。
+
+    线索不存在 404；键不在白名单 / 取值为空 / 日期不是 `YYYY-MM-DD` 一律 422 且不落库。
+    只覆盖传入的键，其余字段保持原样（合并口径在 `domain/rules.py` 的 `merge_fields`）。
+    """
+    lead, issues = service.update_fields(lead_id, payload.fields)
+    if lead is None:
+        return JSONResponse(status_code=404, content=_issue_body(issues))
+    if issues:
+        return JSONResponse(status_code=422, content=_issue_body(issues))
+    return _lead_body(lead)
 
 
 @app.post("/leads/import")
@@ -521,9 +555,10 @@ def create_raw(lead_id: str, payload: RawIn, service: IngestDep):
 
 @app.post("/raws/{raw_id}/extract")
 def extract_raw(raw_id: str, service: IngestDep):
-    """对一条原文跑提炼：返回采纳的事实、被丢弃的原因、以及这次运行的账。
+    """对一条原文跑提炼：返回采纳的事实、被丢弃的原因、这次运行的账、以及自动补上的线索字段。
 
     素材不存在 404；重复提炼不报错，只是 `accepted` 为空（候选全命中「重复值」）。
+    `field_updates` 是这次提炼补齐的线索字段（可能为 `{}`），前端据此提示「已自动补齐」。
     """
     outcome = service.extract(raw_id)
     if not outcome.ok:
@@ -540,6 +575,7 @@ def extract_raw(raw_id: str, service: IngestDep):
             {"location": issue.location, "message": issue.message} for issue in outcome.skipped
         ],
         "run": None if outcome.run is None else _run_body(outcome.run),
+        "field_updates": dict(outcome.field_updates),
     }
 
 
@@ -624,16 +660,22 @@ def generate_draft(lead_id: str, service: DraftDep):
 
 @app.post("/leads/{lead_id}/drafts/{draft_id}/confirm", status_code=201)
 def confirm_draft(lead_id: str, draft_id: str, payload: DraftConfirmIn, service: DraftDep):
-    """确认草稿落库成跟进留痕：成功 201 返回那条跟进；草稿不存在 404，已处理过 409。"""
-    item, issues = service.confirm(
+    """确认草稿落库成跟进留痕：成功 201 返回那条跟进，并带确认后的线索 `fields`。
+
+    确认时把草稿正文同时写进线索的 `conclusion` 字段（`close` 块的必填项）。
+    草稿不存在 404，已处理过 409。
+    """
+    outcome = service.confirm(
         lead_id,
         draft_id,
         objection=payload.objection,
         next_followup_at=payload.next_followup_at,
     )
-    if item is None:
-        return JSONResponse(status_code=_draft_status(issues), content=_issue_body(issues))
-    return _followup_body(item)
+    if outcome.item is None:
+        return JSONResponse(
+            status_code=_draft_status(outcome.issues), content=_issue_body(outcome.issues)
+        )
+    return {**_followup_body(outcome.item), "fields": dict(outcome.fields)}
 
 
 @app.delete("/leads/{lead_id}/drafts/{draft_id}", status_code=204)

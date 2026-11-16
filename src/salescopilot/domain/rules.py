@@ -11,12 +11,15 @@ from datetime import date
 
 from salescopilot.domain.blocks import BLOCKS, Block
 from salescopilot.domain.labels import block_label, field_label
-from salescopilot.domain.models import ALLOWED_OBJECTIONS, ALLOWED_SOURCES
+from salescopilot.domain.models import ALLOWED_OBJECTIONS, ALLOWED_SOURCES, EDITABLE_LEAD_FIELDS
 
 # 联系方式的最小长度与对应的原因文案：新建线索（这里）与 CSV 导入
 # （`domain/csv_import.py`）共用这一条，两边不各写一份阈值和一句提示。
 MIN_CONTACT_LEN = 5
 CONTACT_TOO_SHORT = "联系方式至少需要 5 个字符"
+
+# 线索字段取值的长度上限：与事实取值同一口径（`domain/facts.py` 的 MAX_FACT_VALUE_LEN）。
+MAX_FIELD_VALUE_LEN = 200
 
 REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow")
 REQUIRED_THRESHOLD_KEYS = (
@@ -209,7 +212,7 @@ def _check_advance_fields(target_stage: str, fields: dict) -> list[ValidationIss
 
     issues: list[ValidationIssue] = []
     for name in block.requires:
-        if not _is_filled(fields.get(name)):
+        if not is_filled(fields.get(name)):
             issues.append(
                 ValidationIssue(
                     f"fields.{name}",
@@ -219,12 +222,84 @@ def _check_advance_fields(target_stage: str, fields: dict) -> list[ValidationIss
     return issues
 
 
-def _is_filled(value: object) -> bool:
+def is_filled(value: object) -> bool:
+    """这个字段算不算「填过了」：None 与纯空白字符串都算没填（数字 0 算填了）。"""
     if value is None:
         return False
     if isinstance(value, str):
         return bool(value.strip())
     return True
+
+
+def validate_lead_fields(fields: dict) -> list[ValidationIssue]:
+    """校验一份线索字段补丁；空列表表示可以落库。
+
+    规则：
+    1. 键必须在 `EDITABLE_LEAD_FIELDS` 内（白名单只取块契约里出现过的必填字段）；
+    2. 取值去首尾空格后不能为空，长度不超过 `MAX_FIELD_VALUE_LEN`；
+    3. `appointment_at` 只认 `YYYY-MM-DD`，统一 ISO 日期（中文时间描述留给事实层的原文，
+       进流程字段的必须是可比较的日期）。
+
+    问题位置写成 `fields.<字段名>`，与推进校验（`validate_advance`）的位置口径一致。
+    """
+    if not isinstance(fields, dict):
+        return [ValidationIssue("fields", "字段补丁必须是映射（字段名 -> 取值）")]
+
+    issues: list[ValidationIssue] = []
+    allowed = "、".join(EDITABLE_LEAD_FIELDS)
+    for name, value in fields.items():
+        location = f"fields.{name}"
+        if name not in EDITABLE_LEAD_FIELDS:
+            issues.append(
+                ValidationIssue(location, f"字段必须是以下之一：{allowed}（实际是 {name}）")
+            )
+            continue
+
+        label = field_label(name)
+        if not isinstance(value, str):
+            issues.append(ValidationIssue(location, f"「{label}」必须是文本"))
+            continue
+
+        text = value.strip()
+        if not text:
+            issues.append(ValidationIssue(location, f"「{label}」不能为空"))
+        elif len(text) > MAX_FIELD_VALUE_LEN:
+            issues.append(
+                ValidationIssue(
+                    location,
+                    f"「{label}」不能超过 {MAX_FIELD_VALUE_LEN} 个字符（实际 {len(text)}）",
+                )
+            )
+        elif name == "appointment_at" and not _is_iso_date(text):
+            issues.append(
+                ValidationIssue(location, f"「{label}」必须是 YYYY-MM-DD 格式（实际是 {text}）")
+            )
+
+    return issues
+
+
+def merge_fields(current: dict, patch: dict) -> dict:
+    """合并字段补丁：只覆盖传入的键，其余键原样保留（不删任何已有字段）。
+
+    字符串取值去首尾空格后落库，与 `validate_lead_fields` 的判定口径保持一致。
+    输入一律复制，不改调用方手里的那个 dict。
+    """
+    merged = dict(current)
+    for name, value in patch.items():
+        merged[name] = value.strip() if isinstance(value, str) else value
+    return merged
+
+
+def missing_fields_for(block_id: str, fields: dict) -> list[str]:
+    """进入该块前还缺哪些必填字段（顺序与块契约一致）；未知块返回空列表。
+
+    块契约只从 `blocks.py` 取；`fields` 传「基础属性 + 已采集字段」的合并视图
+    （线索的 `contact` / `source` 本身就是实体属性，不是 `fields` 里的键）。
+    """
+    block = BLOCKS.get(block_id)
+    if block is None:
+        return []
+    return [name for name in block.requires if not is_filled(fields.get(name))]
 
 
 def validate_template(data: dict, blocks: dict[str, Block] = BLOCKS) -> list[ValidationIssue]:

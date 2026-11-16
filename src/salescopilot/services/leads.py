@@ -6,12 +6,15 @@
 
 import uuid
 from collections.abc import Callable, Collection
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
 from salescopilot.domain.ports import LeadRepository
 from salescopilot.domain.rules import (
     ValidationIssue,
+    merge_fields,
+    validate_lead_fields,
     validate_new_lead,
     validate_template_key,
 )
@@ -71,3 +74,24 @@ class LeadService:
     def list(self) -> list[Lead]:
         """全部线索，按创建时间倒序（顺序由仓储实现保证）。"""
         return self._repo.list()
+
+    def update_fields(
+        self, lead_id: str, patch: dict[str, str]
+    ) -> tuple[Lead | None, list[ValidationIssue]]:
+        """人工补录线索字段：校验 → 合并 → 落库；返回（更新后的线索, 问题列表）。
+
+        线索不存在时返回 `(None, 问题)`，问题位置是 `lead_id`（路由据此回 404）；
+        其余问题（键不在白名单、取值为空、日期不是 `YYYY-MM-DD`）一律不落库，
+        位置是 `fields.<字段名>`，与推进校验的错误位置同一口径。
+        """
+        lead = self._repo.get(lead_id)
+        if lead is None:
+            return None, [ValidationIssue("lead_id", "线索不存在")]
+
+        issues = validate_lead_fields(patch)
+        if issues:
+            return lead, issues
+
+        merged = merge_fields(lead.fields, patch)
+        self._repo.update_fields(lead_id, merged)
+        return replace(lead, fields=merged), []

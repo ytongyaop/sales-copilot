@@ -13,7 +13,7 @@
 import hashlib
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from salescopilot.domain.errors import ExtractError
 from salescopilot.domain.facts import (
@@ -21,6 +21,7 @@ from salescopilot.domain.facts import (
     MAX_FACT_VALUE_LEN,
     decide_merge,
     dedupe_candidates,
+    fields_from_facts,
     validate_candidates_indexed,
 )
 from salescopilot.domain.models import ExtractRun, Fact, RawItem
@@ -31,7 +32,7 @@ from salescopilot.domain.ports import (
     LeadRepository,
     RawItemRepository,
 )
-from salescopilot.domain.rules import ValidationIssue
+from salescopilot.domain.rules import ValidationIssue, merge_fields
 from salescopilot.services.leads import utc_now_iso
 
 # 一段素材少于这个字数就没有提炼价值（也为「脏输入」留一个统一口径）。
@@ -43,13 +44,18 @@ MANUAL_SOURCE_SPAN = "(人工录入)"
 
 @dataclass(frozen=True)
 class ExtractOutcome:
-    """一次提炼的结果：成功的候选、被丢弃的原因、以及这次运行的账。"""
+    """一次提炼的结果：成功的候选、被丢弃的原因、这次运行的账、以及自动补上的线索字段。
+
+    `field_updates` 是「这次提炼把哪些线索字段补齐了」（键是字段名，值是落库的取值）；
+    没有补任何字段时是空字典——重复提炼、人工已填的字段都不会出现在这里。
+    """
 
     ok: bool
     issues: list[ValidationIssue]
     accepted: list[Fact]
     skipped: list[ValidationIssue]
     run: ExtractRun | None
+    field_updates: dict[str, str] = field(default_factory=dict)
 
 
 class IngestService:
@@ -174,7 +180,25 @@ class IngestService:
             at=now,
         )
         self._runs.add(run)
-        return ExtractOutcome(True, [], accepted, skipped, run)
+        field_updates = self._sync_lead_fields(raw.lead_id)
+        return ExtractOutcome(True, [], accepted, skipped, run, field_updates)
+
+    def _sync_lead_fields(self, lead_id: str) -> dict[str, str]:
+        """把「当前事实」补进线索字段（只补缺的键），返回这次补上的字段。
+
+        顺序必须在事实落库之后：事实是唯一的结构化来源，线索字段只是流程推进要用的
+        那份视图；已填的键一律不动（人填的、之前提炼过的都算已填）。
+        """
+        lead = self._leads.get(lead_id)
+        if lead is None:
+            return {}
+        patch = fields_from_facts(self._facts.list_for(lead_id), lead.fields)
+        if not patch:
+            return {}
+
+        merged = merge_fields(lead.fields, patch)
+        self._leads.update_fields(lead_id, merged)
+        return patch
 
     def runs_for(self, raw_id: str) -> list[ExtractRun]:
         """该素材的提炼账本，按时间正序。"""

@@ -64,7 +64,7 @@ def test_extract_returns_accepted_skipped_and_run(client: TestClient) -> None:
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"accepted", "skipped", "run"}
+    assert set(body) == {"accepted", "skipped", "run", "field_updates"}
     assert [fact["field"] for fact in body["accepted"]] == [
         "objection",
         "need",

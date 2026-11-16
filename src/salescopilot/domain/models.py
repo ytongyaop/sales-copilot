@@ -21,6 +21,18 @@ ALLOWED_OBJECTIONS: tuple[str, ...] = ("price", "time", "effect", "trust", "othe
 # 归属变更原因：为什么这条线索换了/没了归属人；扩展枚举同样只改这里。
 ALLOWED_ASSIGNMENT_REASONS: tuple[str, ...] = ("claim", "release", "auto_reclaim", "manual")
 
+# 可以人工补录 / 由提炼自动补齐的线索字段：只取块契约 `requires` 里出现过的字段名，
+# 不自造新字段（扩展要改这里，不要在别处另写一份白名单）。
+EDITABLE_LEAD_FIELDS: tuple[str, ...] = (
+    "contact",
+    "source",
+    "decision_maker",
+    "need",
+    "appointment_at",
+    "amount",
+    "conclusion",
+)
+
 # 草稿状态：生成即 pending；确认落库后 confirmed；人工丢弃后 discarded（不再可确认）。
 DRAFT_PENDING = "pending"
 DRAFT_CONFIRMED = "confirmed"

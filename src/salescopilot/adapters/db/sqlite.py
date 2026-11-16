@@ -211,6 +211,18 @@ class SqliteLeadRepository(_SqliteRepository):
         with self._open() as conn:
             conn.execute("UPDATE leads SET owner = ? WHERE id = ?", (owner, lead_id))
 
+    def update_fields(self, lead_id: str, fields: dict[str, str]) -> None:
+        """整份覆盖线索字段（`fields_json`）。
+
+        合并口径在 `domain/rules.py` 的 `merge_fields`（只覆盖传入的键），校验在
+        `validate_lead_fields`；这一层只负责把结果写成一列 JSON，不做任何判断。
+        """
+        with self._open() as conn:
+            conn.execute(
+                "UPDATE leads SET fields_json = ? WHERE id = ?",
+                (json.dumps(fields, ensure_ascii=False), lead_id),
+            )
+
     @staticmethod
     def _to_lead(row: sqlite3.Row) -> Lead:
         return Lead(

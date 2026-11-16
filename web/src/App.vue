@@ -20,6 +20,7 @@ import {
   listReminders,
   listTemplates,
   patchFact,
+  patchLeadFields,
   releaseLead,
 } from './api'
 
@@ -121,6 +122,19 @@ const draftIssues = ref({})
 const draftError = ref({})
 const draftBusy = ref({})
 const confirmForm = ref({})
+
+// 补字段：块契约的必填项由后端 `GET /templates` 的 `requires` 给出（前端不复制块规则），
+// 缺哪几项、能不能补由后端判定；这里只负责显示与收集。
+const LEAD_FIELD_LABELS = {
+  ...Object.fromEntries(FACT_FIELDS.map((item) => [item.value, item.label])),
+  contact: '联系方式',
+  source: '来源',
+  conclusion: '结论',
+}
+const fieldFormOpen = ref('')
+const fieldFormValues = ref({})
+const fieldErrors = ref({})
+const fieldBusy = ref(false)
 
 function sourceLabel(value) {
   const hit = SOURCES.find((item) => item.value === value)
@@ -272,6 +286,75 @@ function nextStageLabel(lead) {
   if (!next) return ''
   const template = templateOf(lead)
   return (template && template.labels && template.labels[next]) || next
+}
+
+// -------------------------------------------------------------- 补字段
+// 取字段的口径与后端 FlowService 一致：`contact` / `source` 就是线索自身属性，
+// 其余字段在 `lead.fields` 里（后端 GET /leads 每条都带 `fields`）。
+function leadFieldValue(lead, field) {
+  const fields = lead.fields || {}
+  if (Object.prototype.hasOwnProperty.call(fields, field)) return fields[field]
+  return lead[field] || ''
+}
+
+function leadFieldLabel(field) {
+  return LEAD_FIELD_LABELS[field] || field
+}
+
+// 下一个块的必填项里还缺哪些：块契约取后端模板的 requires，前端不硬编码。
+function missingFields(lead) {
+  const template = templateOf(lead)
+  const next = nextStage(lead)
+  if (!template || !next) return []
+  const requires = (template.requires && template.requires[next]) || []
+  return requires.filter((field) => String(leadFieldValue(lead, field)).trim() === '')
+}
+
+function toggleFieldForm(lead) {
+  if (fieldFormOpen.value === lead.id) {
+    fieldFormOpen.value = ''
+    return
+  }
+  const values = {}
+  for (const field of missingFields(lead)) values[field] = ''
+  fieldFormValues.value = { ...fieldFormValues.value, [lead.id]: values }
+  fieldErrors.value = { ...fieldErrors.value, [lead.id]: '' }
+  fieldFormOpen.value = lead.id
+}
+
+async function saveLeadFields(lead) {
+  const values = fieldFormValues.value[lead.id] || {}
+  const patch = {}
+  for (const [field, value] of Object.entries(values)) {
+    if (String(value || '').trim() !== '') patch[field] = String(value).trim()
+  }
+  if (Object.keys(patch).length === 0) {
+    fieldErrors.value = { ...fieldErrors.value, [lead.id]: '请至少填写一项再保存' }
+    return
+  }
+
+  fieldBusy.value = true
+  fieldErrors.value = { ...fieldErrors.value, [lead.id]: '' }
+  try {
+    await patchLeadFields(lead.id, patch)
+    fieldFormOpen.value = ''
+    await load()
+    // 补完自动重试推进一次：能过就过；过不了由推进把「还缺什么」直接显示出来。
+    const fresh = leads.value.find((item) => item.id === lead.id)
+    if (fresh) await advance(fresh)
+  } catch (err) {
+    fieldErrors.value = { ...fieldErrors.value, [lead.id]: err.message }
+  } finally {
+    fieldBusy.value = false
+  }
+}
+
+// 提炼补了哪些字段：键是字段名，值落库时已经校验过，这里只做中文名翻译。
+function fieldUpdateLabel(leadId) {
+  const info = extractInfo.value[leadId]
+  if (!info || !info.fields) return ''
+  const names = Object.keys(info.fields).map(leadFieldLabel)
+  return names.join('、')
 }
 
 async function load() {
@@ -460,9 +543,15 @@ async function runExtract(lead) {
     const result = await extractRaw(raw.id)
     extractInfo.value = {
       ...extractInfo.value,
-      [lead.id]: { accepted: result.accepted.length, skipped: result.skipped },
+      [lead.id]: {
+        accepted: result.accepted.length,
+        skipped: result.skipped,
+        fields: result.field_updates || {},
+      },
     }
     await loadFacts(lead.id)
+    // 字段可能被这次提炼补齐了：刷新列表，让「补字段」「推进」按钮跟着变。
+    await load()
   } catch (err) {
     rawError.value = { ...rawError.value, [lead.id]: err.message }
   } finally {
@@ -538,6 +627,8 @@ async function submitDraft(lead) {
     await confirmDraft(lead.id, current.draft_id, form)
     clearDraft(lead.id)
     await loadFollowups(lead.id)
+    // 确认时草稿正文也写进了线索的「结论」字段：刷新列表，让推进按钮与缺字段提示同步。
+    await load()
   } catch (err) {
     draftIssues.value = { ...draftIssues.value, [lead.id]: draftIssueList(err) }
   } finally {
@@ -769,6 +860,15 @@ onMounted(async () => {
                   {{ expandedId === lead.id ? '收起' : '记录跟进' }}
                 </button>
                 <button
+                  v-if="missingFields(lead).length"
+                  type="button"
+                  class="ghost"
+                  :title="`还缺：${missingFields(lead).map(leadFieldLabel).join('、')}`"
+                  @click="toggleFieldForm(lead)"
+                >
+                  {{ fieldFormOpen === lead.id ? '收起补字段' : '补字段' }}
+                </button>
+                <button
                   v-if="!lead.owner"
                   type="button"
                   class="ghost"
@@ -788,6 +888,34 @@ onMounted(async () => {
                 >
                   释放
                 </button>
+              </td>
+            </tr>
+
+            <tr v-if="fieldFormOpen === lead.id" class="expand">
+              <td colspan="7">
+                <div class="followup-form">
+                  <label v-for="field in missingFields(lead)" :key="field">
+                    {{ leadFieldLabel(field) }}
+                    <input
+                      v-if="field === 'appointment_at'"
+                      v-model="fieldFormValues[lead.id][field]"
+                      type="date"
+                    />
+                    <input
+                      v-else
+                      v-model="fieldFormValues[lead.id][field]"
+                      type="text"
+                      placeholder="填写取值"
+                    />
+                  </label>
+                </div>
+                <div class="row-actions">
+                  <button type="button" :disabled="fieldBusy" @click="saveLeadFields(lead)">
+                    {{ fieldBusy ? '保存中…' : '保存并重试推进' }}
+                  </button>
+                  <span class="muted">保存后自动重试推进一次</span>
+                </div>
+                <p v-if="fieldErrors[lead.id]" class="error">{{ fieldErrors[lead.id] }}</p>
               </td>
             </tr>
 
@@ -864,6 +992,9 @@ onMounted(async () => {
 
                     <div v-if="extractInfo[lead.id]" class="extract-result">
                       <p class="hint">本次采纳 {{ extractInfo[lead.id].accepted }} 条</p>
+                      <p v-if="fieldUpdateLabel(lead.id)" class="hint">
+                        已自动补齐：{{ fieldUpdateLabel(lead.id) }}
+                      </p>
                       <details v-if="extractInfo[lead.id].skipped.length" class="inline">
                         <summary class="muted">
                           跳过 {{ extractInfo[lead.id].skipped.length }} 条（点击看原因）
