@@ -129,7 +129,10 @@ def test_generate_rejected_when_model_cites_nothing(tmp_path: Path) -> None:
     outcome, issues = service.generate("lead-1")
 
     assert outcome.ok is False
-    assert [issue.message for issue in issues] == ["模型未引用任何资料"]
+    assert [issue.location for issue in issues] == ["draft"]
+    assert [issue.message for issue in issues] == [
+        "模型没有引用任何资料，已拒绝生成（可补充资料，或在跟进里写明依据后再生成）"
+    ]
     assert drafts.list_for("lead-1") == []
 
 

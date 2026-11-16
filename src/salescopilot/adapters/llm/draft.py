@@ -7,6 +7,10 @@
 
 `used_hit_indexes` 是 `hits` 的 **0 基下标**：模型输出「资料编号」从 1 开始，
 适配器负责换算，用例层拿到的永远是能直接 `hits[i]` 的整数。
+
+引用为空时的处理：模型常常「只靠客户事实就把话写完了」，于是 `used` 回 `[]`。
+这时追加一段强化指令**重试一次**（最多一次）；重试还空就原样返回 `used=[]`，
+由用例层拒绝——**绝不替模型挑一条资料凑引用**：编出来的引用比拒绝生成更糟。
 """
 
 import json
@@ -34,6 +38,12 @@ _REASON_MAX_LEN = 80
 
 # 假实现默认的下一步时间：固定值，保证离线测试可断言。
 FAKE_NEXT_STEP = "周三上午十点"
+
+# 第一次写了话术却一条资料都没引用时，追加在 user 消息末尾的强化指令（只追加一次）。
+NO_CITATION_HINT = (
+    "【重要】你刚才没有引用任何资料。请重新写一次：话术里必须体现至少一条资料片段中的"
+    "具体信息，并在 used 中给出对应编号。若确实全部无关，才允许 used 为空。"
+)
 
 
 class FakeDrafter:
@@ -71,7 +81,13 @@ class FakeDrafter:
 
 
 class DeepSeekDrafter:
-    """DeepSeek 话术生成器：要求模型回 JSON（正文 + 用到的资料编号），解析失败即重试。"""
+    """DeepSeek 话术生成器：要求模型回 JSON（正文 + 用到的资料编号）。
+
+    两种重试各管一件事：
+    - **调用/解析失败**：按 `max_retries` 重试（`_complete` 内部）；
+    - **成功但没引用资料**（`used == []` 且 `hits` 非空）：追加强化指令再问一次（最多 1 次）。
+    两次调用的 token 与耗时都累加进 `DraftResult`，成本如实反映在记录里。
+    """
 
     def __init__(
         self,
@@ -88,22 +104,48 @@ class DeepSeekDrafter:
         self._max_retries = max(0, int(max_retries))
 
     def draft(self, *, lead: Lead, facts: list[Fact], hits: list[dict]) -> DraftResult:
-        messages = [
-            {"role": "system", "content": DRAFT_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": build_draft_user_prompt(
-                    facts=list(facts), hits=list(hits), stage=lead.stage
-                ),
-            },
-        ]
+        user_prompt = build_draft_user_prompt(facts=list(facts), hits=list(hits), stage=lead.stage)
+        system_message = {"role": "system", "content": DRAFT_SYSTEM_PROMPT}
 
         started = time.perf_counter()
+        text, used, token = self._complete(
+            [system_message, {"role": "user", "content": user_prompt}]
+        )
+
+        if hits and not used:
+            # 空引用大多不是模型偷懒，而是它认为「客户事实已经够写了」。给它一次带强化指令的
+            # 机会；重试还空就保持 used=[]，让用例层拒绝——这里绝不替它挑资料凑引用。
+            try:
+                retry_text, retry_used, retry_token = self._complete(
+                    [
+                        system_message,
+                        {"role": "user", "content": f"{user_prompt}\n\n{NO_CITATION_HINT}"},
+                    ]
+                )
+            except DraftError:
+                # 重试自己失败（网络/解析）：第一次的正文留着，仍按「未引用」拒绝，不升级成报错。
+                pass
+            else:
+                text, used = retry_text, retry_used
+                token += retry_token
+
+        return DraftResult(
+            text=text,
+            used_hit_indexes=used,
+            model=self._model,
+            prompt_version=self._prompt_version,
+            token=token,
+            seconds=time.perf_counter() - started,
+        )
+
+    def _complete(self, messages: list[dict]) -> tuple[str, list[int], int]:
+        """调一次模型（调用或解析失败按 `max_retries` 重试），返回（正文, 0 基引用, token）。
+
+        只管「这次没拿到可用返回」；模型成功返回却没引用资料不算失败，交给 `draft` 判断。
+        每次调用各自重试，所以两次 `_complete` 的耗时与 token 相加就是这次生成的真实成本。
+        """
         attempts = 0
         reason = "未知原因"
-        response = None
-        text = ""
-        used: list[int] = []
 
         for attempt in range(self._max_retries + 1):
             attempts = attempt + 1
@@ -118,18 +160,9 @@ class DeepSeekDrafter:
             except Exception as exc:  # noqa: BLE001 - 网络与解析失败都走同一条重试路径
                 reason = _describe(exc)
                 continue
-            break
-        else:
-            raise DraftError(f"话术生成失败：{reason}（已尝试 {attempts} 次）")
+            return text, used, _total_tokens(response)
 
-        return DraftResult(
-            text=text,
-            used_hit_indexes=used,
-            model=self._model,
-            prompt_version=self._prompt_version,
-            token=_total_tokens(response),
-            seconds=time.perf_counter() - started,
-        )
+        raise DraftError(f"话术生成失败：{reason}（已尝试 {attempts} 次）")
 
 
 def _first_value(facts: list[Fact], field: str) -> str:

@@ -122,7 +122,14 @@ class DraftService:
 
         used = [index for index in result.used_hit_indexes if 0 <= index < len(hits)]
         if not used:
-            return _fail([ValidationIssue("draft", "模型未引用任何资料")])
+            return _fail(
+                [
+                    ValidationIssue(
+                        "draft",
+                        "模型没有引用任何资料，已拒绝生成（可补充资料，或在跟进里写明依据后再生成）",
+                    )
+                ]
+            )
         citations = build_citations_payload([hits[index] for index in used])
         if not citations:
             return _fail([ValidationIssue("draft", "模型引用的资料没有正文")])
