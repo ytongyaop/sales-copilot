@@ -7,8 +7,10 @@
 """
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 
+from salescopilot.domain.card import declared_field_keys
 from salescopilot.domain.models import ALLOWED_OBJECTIONS, Fact
 from salescopilot.domain.rules import ValidationIssue, is_filled, validate_lead_fields
 
@@ -33,6 +35,16 @@ FACT_TO_FIELD: dict[str, str] = {
 MAX_FACT_VALUE_LEN = 200
 
 
+def allowed_fact_fields(spec: dict | None = None) -> tuple[str, ...]:
+    """事实字段白名单：旧默认 `ALLOWED_FACT_FIELDS` ∪ 模板 `card` 段声明的字段。
+
+    旧默认一定保留（向后兼容：老链路、老模板、老调用方都不受影响）；模板声明按声明
+    顺序追加在后并去重。`spec` 为空时就是旧默认，行为与改造前一致。
+    """
+    declared = declared_field_keys(spec) if spec else ()
+    return tuple(dict.fromkeys((*ALLOWED_FACT_FIELDS, *declared)))
+
+
 @dataclass(frozen=True)
 class _Candidate:
     """校验通过的候选（内部用）：值已去空格，置信度已转 float。"""
@@ -45,29 +57,34 @@ class _Candidate:
 
 def validate_candidates(
     candidates: list[dict],
+    *,
+    allowed: Collection[str] | None = None,
 ) -> tuple[list[dict], list[ValidationIssue]]:
     """逐条校验提炼候选；返回（通过的候选, 被丢弃的问题）。
 
-    丢弃规则：字段不在白名单、值去空格后为空或超过 200 字、原文片段为空、
-    异议不在枚举内、置信度不是 0..1 的数值。问题位置写成 `candidates[i].<哪一项>`，
-    方便前端直接指到第几条候选的哪个字段。
+    丢弃规则：字段不在白名单（`allowed` 由调用方传，默认 `ALLOWED_FACT_FIELDS`）、
+    值去空格后为空或超过 200 字、原文片段为空、异议不在枚举内、置信度不是 0..1 的数值。
+    问题位置写成 `candidates[i].<哪一项>`，方便前端直接指到第几条候选的哪个字段。
     """
-    indexed, issues = validate_candidates_indexed(candidates)
+    indexed, issues = validate_candidates_indexed(candidates, allowed=allowed)
     return [candidate for _, candidate in indexed], issues
 
 
 def validate_candidates_indexed(
     candidates: list[dict],
+    *,
+    allowed: Collection[str] | None = None,
 ) -> tuple[list[tuple[int, dict]], list[ValidationIssue]]:
     """同 `validate_candidates`，但保留候选在原列表里的下标。
 
     用例层要靠这个下标写出「这条候选为什么没落库」（位置指回模型原始输出）。
     """
+    permitted = tuple(allowed) if allowed is not None else ALLOWED_FACT_FIELDS
     passed: list[tuple[int, dict]] = []
     issues: list[ValidationIssue] = []
 
     for index, candidate in enumerate(candidates):
-        parsed, candidate_issues = _validate_one(index, candidate)
+        parsed, candidate_issues = _validate_one(index, candidate, permitted)
         if parsed is None:
             issues.extend(candidate_issues)
             continue
@@ -86,7 +103,9 @@ def validate_candidates_indexed(
     return passed, issues
 
 
-def _validate_one(index: int, candidate: object) -> tuple[_Candidate | None, list[ValidationIssue]]:
+def _validate_one(
+    index: int, candidate: object, allowed: tuple[str, ...]
+) -> tuple[_Candidate | None, list[ValidationIssue]]:
     if not isinstance(candidate, dict):
         return None, [ValidationIssue(f"candidates[{index}]", "候选必须是映射")]
 
@@ -96,12 +115,12 @@ def _validate_one(index: int, candidate: object) -> tuple[_Candidate | None, lis
     field_text = field.strip() if isinstance(field, str) else ""
     if not field_text:
         issues.append(ValidationIssue(f"candidates[{index}].field", "字段不能为空"))
-    elif field_text not in ALLOWED_FACT_FIELDS:
-        allowed = "、".join(ALLOWED_FACT_FIELDS)
+    elif field_text not in allowed:
+        allowed_text = "、".join(allowed)
         issues.append(
             ValidationIssue(
                 f"candidates[{index}].field",
-                f"字段必须是以下之一：{allowed}（实际是 {field_text}）",
+                f"字段必须是以下之一：{allowed_text}（实际是 {field_text}）",
             )
         )
 
@@ -123,11 +142,11 @@ def _validate_one(index: int, candidate: object) -> tuple[_Candidate | None, lis
         issues.append(ValidationIssue(f"candidates[{index}].source_span", "原文片段不能为空"))
 
     if field_text == "objection" and value_text and value_text not in ALLOWED_OBJECTIONS:
-        allowed = "、".join(ALLOWED_OBJECTIONS)
+        allowed_objections = "、".join(ALLOWED_OBJECTIONS)
         issues.append(
             ValidationIssue(
                 f"candidates[{index}].value",
-                f"异议取值必须是以下之一：{allowed}（实际是 {value_text}）",
+                f"异议取值必须是以下之一：{allowed_objections}（实际是 {value_text}）",
             )
         )
 

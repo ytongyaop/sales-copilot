@@ -10,8 +10,14 @@ from dataclasses import dataclass
 from datetime import date
 
 from salescopilot.domain.blocks import BLOCKS, Block
+from salescopilot.domain.card import declared_field_keys
 from salescopilot.domain.labels import block_label, field_label
-from salescopilot.domain.models import ALLOWED_OBJECTIONS, ALLOWED_SOURCES, EDITABLE_LEAD_FIELDS
+from salescopilot.domain.models import (
+    ALLOWED_OBJECTIONS,
+    ALLOWED_SOURCES,
+    CARD_SECTIONS,
+    EDITABLE_LEAD_FIELDS,
+)
 
 # 联系方式的最小长度与对应的原因文案：新建线索（这里）与 CSV 导入
 # （`domain/csv_import.py`）共用这一条，两边不各写一份阈值和一句提示。
@@ -21,7 +27,7 @@ CONTACT_TOO_SHORT = "联系方式至少需要 5 个字符"
 # 线索字段取值的长度上限：与事实取值同一口径（`domain/facts.py` 的 MAX_FACT_VALUE_LEN）。
 MAX_FIELD_VALUE_LEN = 200
 
-REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow")
+REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow", "card")
 REQUIRED_THRESHOLD_KEYS = (
     "first_response_minutes",
     "feedback_window_hours",
@@ -231,11 +237,24 @@ def is_filled(value: object) -> bool:
     return True
 
 
-def validate_lead_fields(fields: dict) -> list[ValidationIssue]:
+def allowed_lead_fields(spec: dict | None = None) -> tuple[str, ...]:
+    """线索字段白名单：块契约的旧默认 ∪ 该模板 `card` 段声明的字段。
+
+    旧默认一定保留（向后兼容：老线索、老模板、老调用方都不受影响）；
+    模板声明的字段按声明顺序追加在后，去重。
+    """
+    declared = declared_field_keys(spec) if spec else ()
+    return tuple(dict.fromkeys((*EDITABLE_LEAD_FIELDS, *declared)))
+
+
+def validate_lead_fields(
+    fields: dict, *, allowed: Collection[str] | None = None
+) -> list[ValidationIssue]:
     """校验一份线索字段补丁；空列表表示可以落库。
 
     规则：
-    1. 键必须在 `EDITABLE_LEAD_FIELDS` 内（白名单只取块契约里出现过的必填字段）；
+    1. 键必须在白名单内（`allowed` 由调用方传，默认 `EDITABLE_LEAD_FIELDS`；
+       模板声明了信息卡字段时，调用方传「旧默认 ∪ 模板字段」，见 `allowed_lead_fields`）；
     2. 取值去首尾空格后不能为空，长度不超过 `MAX_FIELD_VALUE_LEN`；
     3. `appointment_at` 只认 `YYYY-MM-DD`，统一 ISO 日期（中文时间描述留给事实层的原文，
        进流程字段的必须是可比较的日期）。
@@ -245,13 +264,14 @@ def validate_lead_fields(fields: dict) -> list[ValidationIssue]:
     if not isinstance(fields, dict):
         return [ValidationIssue("fields", "字段补丁必须是映射（字段名 -> 取值）")]
 
+    permitted = tuple(allowed) if allowed is not None else EDITABLE_LEAD_FIELDS
     issues: list[ValidationIssue] = []
-    allowed = "、".join(EDITABLE_LEAD_FIELDS)
+    allowed_text = "、".join(permitted)
     for name, value in fields.items():
         location = f"fields.{name}"
-        if name not in EDITABLE_LEAD_FIELDS:
+        if name not in permitted:
             issues.append(
-                ValidationIssue(location, f"字段必须是以下之一：{allowed}（实际是 {name}）")
+                ValidationIssue(location, f"字段必须是以下之一：{allowed_text}（实际是 {name}）")
             )
             continue
 
@@ -308,6 +328,80 @@ def validate_template(data: dict, blocks: dict[str, Block] = BLOCKS) -> list[Val
     issues.extend(_check_root_keys(data))
     issues.extend(_check_thresholds(data.get("thresholds")))
     issues.extend(_check_flow(data.get("flow"), blocks, data.get("thresholds")))
+    if "card" in data:
+        issues.extend(_check_card(data.get("card")))
+    return issues
+
+
+def _check_card(card: object) -> list[ValidationIssue]:
+    """校验模板的 `card` 段：四要素齐全、字段三件套齐全、字段 key 全局不重复。
+
+    位置写成 `card.sections.<分区>` / `card.sections.<分区>.fields[i].<哪一项>`，
+    上层可以直接说「第几个分区的第几个字段缺 key」。
+    """
+    if not isinstance(card, dict):
+        return [ValidationIssue("card", "card 必须是映射（sections -> 分区）")]
+
+    sections = card.get("sections")
+    if not isinstance(sections, dict):
+        return [ValidationIssue("card.sections", "card.sections 必须是映射（分区 -> 字段列表）")]
+
+    issues: list[ValidationIssue] = []
+    for key in CARD_SECTIONS:
+        if key not in sections:
+            issues.append(ValidationIssue(f"card.sections.{key}", f"缺少信息卡分区：{key}"))
+    for key in sections:
+        if key not in CARD_SECTIONS:
+            allowed = "、".join(CARD_SECTIONS)
+            issues.append(
+                ValidationIssue(
+                    f"card.sections.{key}", f"未知的信息卡分区「{key}」：只允许 {allowed}"
+                )
+            )
+
+    seen: dict[str, str] = {}
+    for section_key, section in sections.items():
+        location = f"card.sections.{section_key}"
+        if not isinstance(section, dict):
+            issues.append(ValidationIssue(location, "分区必须是映射（label + fields）"))
+            continue
+
+        label = section.get("label")
+        if not isinstance(label, str) or not label.strip():
+            issues.append(ValidationIssue(f"{location}.label", "分区必须有非空 label"))
+
+        fields = section.get("fields")
+        if not isinstance(fields, list) or not fields:
+            issues.append(ValidationIssue(f"{location}.fields", "分区必须是非空字段列表"))
+            continue
+
+        for index, spec in enumerate(fields):
+            field_location = f"{location}.fields[{index}]"
+            if not isinstance(spec, dict):
+                issues.append(
+                    ValidationIssue(field_location, "字段必须是映射（key / label / question）")
+                )
+                continue
+            for name in ("key", "label", "question"):
+                value = spec.get(name)
+                if not isinstance(value, str) or not value.strip():
+                    issues.append(
+                        ValidationIssue(f"{field_location}.{name}", f"字段必须有非空 {name}")
+                    )
+
+            key = spec.get("key")
+            if not isinstance(key, str) or not key.strip():
+                continue
+            key = key.strip()
+            if key in seen:
+                issues.append(
+                    ValidationIssue(
+                        f"{field_location}.key", f"字段 key「{key}」重复（首次出现在 {seen[key]}）"
+                    )
+                )
+            else:
+                seen[key] = f"{field_location}.key"
+
     return issues
 
 

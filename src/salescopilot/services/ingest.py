@@ -17,8 +17,8 @@ from dataclasses import dataclass, field, replace
 
 from salescopilot.domain.errors import ExtractError
 from salescopilot.domain.facts import (
-    ALLOWED_FACT_FIELDS,
     MAX_FACT_VALUE_LEN,
+    allowed_fact_fields,
     decide_merge,
     dedupe_candidates,
     fields_from_facts,
@@ -114,6 +114,7 @@ class IngestService:
         runs: ExtractRunRepository,
         extractor: FactExtractor,
         clock: Callable[[], str] | None = None,
+        template_loader: Callable[[str], dict] | None = None,
     ) -> None:
         self._leads = leads
         self._raws = raws
@@ -121,6 +122,9 @@ class IngestService:
         self._runs = runs
         self._extractor = extractor
         self._clock = clock if clock is not None else utc_now_iso
+        # 模板加载器只用来取「该模板声明了哪些信息卡字段」；没装配时退回旧默认白名单，
+        # 行为与改造前一致（老模板、老调用方不受影响）。
+        self._template_loader = template_loader
 
     # ------------------------------------------------------------------ 采集
 
@@ -163,7 +167,9 @@ class IngestService:
             return ExtractOutcome(False, [ValidationIssue("extractor", str(exc))], [], [], None)
 
         candidates = result.candidates
-        passed, problems = validate_candidates_indexed(candidates)
+        passed, problems = validate_candidates_indexed(
+            candidates, allowed=self._allowed_fields(raw.lead_id)
+        )
         kept, duplicates = dedupe_candidates(passed)
 
         accepted: list[Fact] = []
@@ -221,6 +227,21 @@ class IngestService:
         self._leads.update_fields(lead_id, merged)
         return patch
 
+    def _allowed_fields(self, lead_id: str) -> tuple[str, ...]:
+        """该线索的事实字段白名单：旧默认 ∪ 它自己的模板声明的信息卡字段。
+
+        模板没装配 / 线索不存在 / 模板未知时一律退回旧默认——白名单只扩大不缩小，
+        任何异常都不该让原本能落库的字段突然被拒。
+        """
+        lead = self._leads.get(lead_id)
+        if lead is None or self._template_loader is None:
+            return allowed_fact_fields()
+        try:
+            spec = self._template_loader(lead.template)
+        except KeyError:
+            return allowed_fact_fields()
+        return allowed_fact_fields(spec if isinstance(spec, dict) else None)
+
     def runs_for(self, raw_id: str) -> list[ExtractRun]:
         """该素材的提炼账本，按时间正序。"""
         return self._runs.list_for_raw(raw_id)
@@ -254,10 +275,13 @@ class IngestService:
             return None, [ValidationIssue("lead_id", "线索不存在")]
 
         field_text = field.strip() if isinstance(field, str) else ""
-        if field_text not in ALLOWED_FACT_FIELDS:
-            allowed = "、".join(ALLOWED_FACT_FIELDS)
+        permitted = self._allowed_fields(lead_id)
+        if field_text not in permitted:
+            allowed_text = "、".join(permitted)
             return None, [
-                ValidationIssue("field", f"字段必须是以下之一：{allowed}（实际是 {field_text}）")
+                ValidationIssue(
+                    "field", f"字段必须是以下之一：{allowed_text}（实际是 {field_text}）"
+                )
             ]
 
         text = value.strip() if isinstance(value, str) else ""
@@ -314,10 +338,13 @@ class IngestService:
             return [ValidationIssue("lead_id", "线索不存在")]
 
         field_text = field.strip() if isinstance(field, str) else ""
-        if field_text not in ALLOWED_FACT_FIELDS:
-            allowed = "、".join(ALLOWED_FACT_FIELDS)
+        permitted = self._allowed_fields(lead_id)
+        if field_text not in permitted:
+            allowed_text = "、".join(permitted)
             return [
-                ValidationIssue("field", f"字段必须是以下之一：{allowed}（实际是 {field_text}）")
+                ValidationIssue(
+                    "field", f"字段必须是以下之一：{allowed_text}（实际是 {field_text}）"
+                )
             ]
 
         existing = self._facts.get_by_field(lead_id, field_text)

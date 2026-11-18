@@ -44,7 +44,7 @@
 
 ## 阶段 B：信息卡与分级（S2–S3）
 
-- [ ] **[T005] 四要素信息卡与缺项问题句**
+- [x] **[T005] 四要素信息卡与缺项问题句**
   - 目标：`GET /leads/{id}/card` 返回覆盖度、四要素分组与缺项清单，每个缺项带"下次该问什么"的具体问题句。
   - 涉及文件：`src/salescopilot/domain/card.py`（新建）、`src/salescopilot/services/card.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/templates/*.yaml`（加 `card.fields` 数据）、`tests/test_card_domain.py`（新建）、`tests/test_card_api.py`（新建）
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_card_domain.py tests\test_card_api.py`；接口返回 `missing[]` 每项 `question` 非空（断言）

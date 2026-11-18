@@ -52,6 +52,7 @@ from salescopilot.domain.ports import (
 )
 from salescopilot.domain.rules import validate_template
 from salescopilot.services.assignment import AssignmentService
+from salescopilot.services.card import CardService
 from salescopilot.services.dashboard import DashboardService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
@@ -101,7 +102,19 @@ def template_loader(key: str) -> dict:
 def build_lead_service() -> LeadService:
     """读配置 → 建 SQLite 仓储 → 注入用例服务（允许的模板 key 取自启动时已加载的清单）。"""
     repo: LeadRepository = SqliteLeadRepository(default_db_path())
-    return LeadService(repo, allowed_templates=frozenset(templates()))
+    return LeadService(
+        repo,
+        allowed_templates=frozenset(templates()),
+        template_loader=template_loader,
+    )
+
+
+def build_card_service() -> CardService:
+    """信息卡用例：线索 + 事实两条仓储 + 模板加载器（模板声明字段、事实给值）。"""
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    facts: FactRepository = SqliteFactRepository(db)
+    return CardService(leads, facts, template_loader)
 
 
 def build_flow_service() -> FlowService:
@@ -186,7 +199,7 @@ def build_ingest_service(live: bool | None = None) -> IngestService:
     facts: FactRepository = SqliteFactRepository(db)
     runs: ExtractRunRepository = SqliteExtractRunRepository(db)
     extractor: FactExtractor = build_extractor(resolved)
-    return IngestService(leads, raws, facts, runs, extractor)
+    return IngestService(leads, raws, facts, runs, extractor, template_loader=template_loader)
 
 
 def index_dir() -> Path:
@@ -276,7 +289,14 @@ def build_sorting_service(live: bool | None = None) -> SortingService:
     raws: RawItemRepository = SqliteRawItemRepository(db)
     batches: SortingBatchRepository = SqliteSortingBatchRepository(db)
     facts: FactRepository = SqliteFactRepository(db)
-    return SortingService(leads, raws, batches, build_sorting_judge(live), facts=facts)
+    return SortingService(
+        leads,
+        raws,
+        batches,
+        build_sorting_judge(live),
+        facts=facts,
+        template_loader=template_loader,
+    )
 
 
 def _resolve_live(live: bool | None) -> bool:

@@ -10,13 +10,20 @@ from typing import Any
 
 import yaml
 
+from salescopilot.domain.rules import validate_template
+
 
 class TemplateError(Exception):
     """模板文件无法读取、不是合法 YAML、或顶层不是映射。"""
 
 
 def load_template(path: Path) -> dict:
-    """读一份模板 YAML，返回顶层映射；不合法一律抛 `TemplateError`。"""
+    """读一份模板 YAML，返回顶层映射；不合法一律抛 `TemplateError`。
+
+    读成映射之后立刻跑一遍 `domain/rules.validate_template`：`card` 段缺分区、
+    字段缺 key / label / question、字段 key 重复等问题在这里就带着文件路径报出来，
+    不让一份坏模板被读进内存、等到某个请求才炸。
+    """
     path = Path(path)
     try:
         text = path.read_text(encoding="utf-8")
@@ -36,6 +43,11 @@ def load_template(path: Path) -> dict:
         raise TemplateError(f"{path}: 模板文件为空")
     if not isinstance(data, dict):
         raise TemplateError(f"{path}: 模板顶层必须是映射，实际是 {type(data).__name__}")
+
+    issues = validate_template(data)
+    if issues:
+        detail = "；".join(f"{issue.location} {issue.message}" for issue in issues)
+        raise TemplateError(f"{path}: 模板校验失败（{detail}）")
     return data
 
 

@@ -24,8 +24,18 @@ from salescopilot.adapters.db.sqlite import (
     SqliteSortingBatchRepository,
 )
 from salescopilot.adapters.llm.fake import FakeSorting
+from salescopilot.adapters.template.loader import load_all
 from salescopilot.domain.models import INITIAL_STAGE, Fact, Lead
 from salescopilot.services.sorting import SortingService
+
+# 真实模板：落事实的字段白名单要按线索自己的模板（`card` 段）推导。
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "src" / "salescopilot" / "templates"
+TEMPLATES = load_all(TEMPLATES_DIR)
+
+
+def _template_loader(key: str) -> dict:
+    return TEMPLATES[key]
+
 
 # 四个块各有一条要素：公司名（basic）/ 需求（needs）/ 决策人（decision）/ 时间（followup）。
 CONTENT = "华远建设有限公司的老板说预算三十万，下周再聊"
@@ -82,7 +92,13 @@ def _setup(tmp_path: Path, *, bad_span: bool = False) -> _Setup:
     leads.add(lead_a)
     leads.add(lead_b)
     service = SortingService(
-        leads, raws, batches, FakeSorting(bad_span=bad_span), clock=_clock(), facts=facts
+        leads,
+        raws,
+        batches,
+        FakeSorting(bad_span=bad_span),
+        clock=_clock(),
+        facts=facts,
+        template_loader=_template_loader,
     )
     return _Setup(service, batches, facts, leads, lead_a, lead_b, db)
 
@@ -269,6 +285,24 @@ def test_decide_touches_only_three_columns(tmp_path: Path) -> None:
     assert after.status == "accepted"
     assert after.decided_at == "2026-11-18T12:00:00+00:00"
     assert after.decided_action == "accepted"
+
+
+def test_accept_syncs_lead_fields_without_overwriting_manual_values(tmp_path: Path) -> None:
+    """同意后把可映射的要素补进线索字段：缺的补上，人填过的一个字都不覆盖。"""
+    setup = _setup(tmp_path)
+    setup.leads.update_fields(setup.lead_a.id, {"need": "人工填的需求"})
+    batch_id = _pending_review(setup)
+
+    outcome = setup.service.confirm(batch_id, action="accept")
+
+    assert outcome.issues == []
+    assert outcome.applied == 4
+    refreshed = setup.leads.get(setup.lead_a.id)
+    assert refreshed is not None
+    # 要素里有决策人（原文「老板」）：流程推进不再因缺这一项卡住
+    assert refreshed.fields["decision_maker"] == "老板"
+    # 人填过的需求保持原值
+    assert refreshed.fields["need"] == "人工填的需求"
 
 
 def test_dropped_diagnostics_are_persisted_and_returned(tmp_path: Path) -> None:

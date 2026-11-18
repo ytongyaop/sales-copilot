@@ -13,6 +13,7 @@ from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
 from salescopilot.domain.ports import LeadRepository
 from salescopilot.domain.rules import (
     ValidationIssue,
+    allowed_lead_fields,
     merge_fields,
     validate_lead_fields,
     validate_new_lead,
@@ -37,10 +38,13 @@ class LeadService:
         repo: LeadRepository,
         allowed_templates: Collection[str] = (DEFAULT_TEMPLATE,),
         clock: Callable[[], str] | None = None,
+        template_loader: Callable[[str], dict] | None = None,
     ) -> None:
         self._repo = repo
         self._allowed_templates = allowed_templates
         self._clock = clock if clock is not None else utc_now_iso
+        # 只用来取「该模板声明了哪些信息卡字段」以扩展补录白名单；没装配时退回旧默认。
+        self._template_loader = template_loader
 
     def create(
         self,
@@ -88,10 +92,22 @@ class LeadService:
         if lead is None:
             return None, [ValidationIssue("lead_id", "线索不存在")]
 
-        issues = validate_lead_fields(patch)
+        issues = validate_lead_fields(
+            patch, allowed=allowed_lead_fields(self._spec_for(lead.template))
+        )
         if issues:
             return lead, issues
 
         merged = merge_fields(lead.fields, patch)
         self._repo.update_fields(lead_id, merged)
         return replace(lead, fields=merged), []
+
+    def _spec_for(self, template: str) -> dict | None:
+        """该模板的完整数据；没装配加载器或模板未知时返回 None（白名单退回旧默认）。"""
+        if self._template_loader is None:
+            return None
+        try:
+            spec = self._template_loader(template)
+        except KeyError:
+            return None
+        return spec if isinstance(spec, dict) else None

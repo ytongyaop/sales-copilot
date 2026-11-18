@@ -17,3 +17,26 @@ flow:
     label: 方案报价
   - block: close
     label: 成交/关闭
+card:
+  sections:
+    basic:
+      label: 基础信息
+      fields:
+        - {key: company,  label: 单位/机构名称, question: "对方是什么单位或机构？"}
+        - {key: industry, label: 所属领域, question: "他们主要做哪一块业务？"}
+        - {key: size,     label: 规模, question: "大概多少人？"}
+    needs:
+      label: 需求与痛点
+      fields:
+        - {key: need,          label: 核心需求, question: "他们最想解决的问题是什么？"}
+        - {key: pain_strength, label: 痛点强度, question: "这个问题现在有多急？不解决会怎样？"}
+    decision:
+      label: 决策流程与预算
+      fields:
+        - {key: decision_maker, label: 决策者, question: "最后谁签字？"}
+        - {key: budget_range,   label: 预算区间, question: "预算大概在什么范围？"}
+    followup:
+      label: 跟进记录
+      fields:
+        - {key: next_step,     label: 下一步动作, question: "下次见面要谈什么？"}
+        - {key: value_provided, label: 本次提供的价值, question: "这次我们给了什么新东西？"}

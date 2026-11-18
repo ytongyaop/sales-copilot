@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 from salescopilot.domain.errors import SortingError
-from salescopilot.domain.facts import decide_merge
+from salescopilot.domain.facts import allowed_fact_fields, decide_merge, fields_from_facts
 from salescopilot.domain.matching import (
     Candidate,
     MatchDecision,
@@ -49,7 +49,12 @@ from salescopilot.domain.ports import (
     SortingBatchRepository,
     SortingJudge,
 )
-from salescopilot.domain.rules import CONTACT_TOO_SHORT, MIN_CONTACT_LEN, ValidationIssue
+from salescopilot.domain.rules import (
+    CONTACT_TOO_SHORT,
+    MIN_CONTACT_LEN,
+    ValidationIssue,
+    merge_fields,
+)
 from salescopilot.domain.sorting import (
     ElementHit,
     SortingSuggestion,
@@ -166,6 +171,7 @@ class SortingService:
         alias_table: dict[str, str] | None = None,
         vector_score: float | None = None,
         facts: FactRepository | None = None,
+        template_loader: Callable[[str], dict] | None = None,
     ) -> None:
         """`extractor` 是分拣模型（要素 / 分级 / 出库一次出）；`grader` 是分级的规则兜底。
 
@@ -173,6 +179,8 @@ class SortingService:
         将来接上向量只换装配，不用改用例。
         `facts`：人工处置要把要素落成事实，装配点必须传；没传时确认类用例会返回
         一条「未装配事实仓储」的问题，而不是悄悄什么都不写。
+        `template_loader`：落事实时用它取「该客户模板声明了哪些信息卡字段」，
+        白名单 = 旧默认 ∪ 模板声明；没装配时退回旧默认（行为与改造前一致）。
         """
         self._leads = leads
         self._raws = raws
@@ -184,6 +192,7 @@ class SortingService:
         self._aliases = dict(alias_table or {})
         self._vector = vector_score
         self._facts = facts
+        self._template_loader = template_loader
 
     # ------------------------------------------------------------------ 投料
 
@@ -397,6 +406,10 @@ class SortingService:
         if write_issues:
             return ConfirmOutcome(batch, write_issues)
 
+        # 落事实成功后顺手把可映射字段补进线索字段（只补缺的键，人填过的绝不覆盖）：
+        # 流程推进看的是线索字段，缺「决策人」会卡在需求确认，这一步把两条链对齐。
+        self._sync_lead_fields(lead.id)
+
         if normalized == DECISION_FIX:
             # 先改挂客户、再记处置：事实已经落到新客户身上，两件事不能一半一半。
             self._batches.attach_lead(batch_id, lead_id=lead.id)
@@ -567,8 +580,14 @@ class SortingService:
         ]
 
         now = self._clock()
+        allowed = self._allowed_fields(lead_id)
         applied = 0
         for element in elements:
+            if element.field not in allowed:
+                skipped.append(
+                    {"field": element.field, "reason": "字段不在该模板声明的信息卡字段里"}
+                )
+                continue
             existing = self._facts.get_by_field(lead_id, element.field)
             candidate = {
                 "field": element.field,
@@ -591,6 +610,37 @@ class SortingService:
             applied += 1
 
         return applied, skipped, []
+
+    def _allowed_fields(self, lead_id: str) -> tuple[str, ...]:
+        """该客户的事实字段白名单：旧默认 ∪ 它自己的模板声明的信息卡字段。
+
+        模板没装配 / 模板未知时退回旧默认——白名单只扩大不缩小，不让原本能落的字段被拒。
+        """
+        lead = self._leads.get(lead_id)
+        if lead is None or self._template_loader is None:
+            return allowed_fact_fields()
+        try:
+            spec = self._template_loader(lead.template)
+        except KeyError:
+            return allowed_fact_fields()
+        return allowed_fact_fields(spec if isinstance(spec, dict) else None)
+
+    def _sync_lead_fields(self, lead_id: str) -> dict[str, str]:
+        """把当前事实补进线索字段（只补缺的键），返回这次补上的字段。
+
+        与提炼链路同一份口径（`fields_from_facts`）：只映射流程推进要用的字段，
+        已填的键一律不动；过不了字段校验的值（比如非 ISO 的时间描述）不自动补。
+        """
+        if self._facts is None:
+            return {}
+        lead = self._leads.get(lead_id)
+        if lead is None:
+            return {}
+        patch = fields_from_facts(self._facts.list_for(lead_id), lead.fields)
+        if not patch:
+            return {}
+        self._leads.update_fields(lead_id, merge_fields(lead.fields, patch))
+        return patch
 
     def _contact_for_claim(self, batch: SortingBatch) -> tuple[str, list[ValidationIssue]]:
         """认领新建客户时取联系方式：只从已过出处校验的要素里找，找不到就留空并提示。"""

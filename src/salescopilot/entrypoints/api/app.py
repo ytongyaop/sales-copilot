@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from salescopilot.domain.blocks import BLOCKS
+from salescopilot.domain.card import Card
 from salescopilot.domain.dashboard import Dashboard
 from salescopilot.domain.labels import block_label
 from salescopilot.domain.models import (
@@ -32,6 +33,7 @@ from salescopilot.domain.rules import ValidationIssue
 from salescopilot.domain.sorting import SortingSuggestion
 from salescopilot.entrypoints.bootstrap import (
     build_assignment_service,
+    build_card_service,
     build_dashboard_service,
     build_draft_service,
     build_flow_service,
@@ -47,6 +49,7 @@ from salescopilot.entrypoints.bootstrap import (
     templates,
 )
 from salescopilot.services.assignment import AssignmentService
+from salescopilot.services.card import CardService
 from salescopilot.services.dashboard import DashboardService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
@@ -227,6 +230,10 @@ def get_sorting_service() -> Iterator[SortingService]:
     yield build_sorting_service()
 
 
+def get_card_service() -> Iterator[CardService]:
+    yield build_card_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -238,6 +245,7 @@ ReclaimDep = Annotated[ReclaimService, Depends(get_reclaim_service)]
 DashboardDep = Annotated[DashboardService, Depends(get_dashboard_service)]
 ImportDep = Annotated[ImportService, Depends(get_import_service)]
 SortingDep = Annotated[SortingService, Depends(get_sorting_service)]
+CardDep = Annotated[CardService, Depends(get_card_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -356,6 +364,39 @@ def _dashboard_body(dashboard: Dashboard) -> dict:
         "stale_ratio": round(dashboard.stale_ratio, 4),
         "silent_count": dashboard.silent_count,
         "reminders_by_level": dict(dashboard.reminders_by_level),
+    }
+
+
+def _card_body(card: Card) -> dict:
+    """信息卡视图：覆盖度 + 四个分区 + 缺项（每项带「下次该问什么」）。
+
+    `coverage` 保留 4 位小数；分区顺序就是展示顺序（basic → needs → decision → followup），
+    `missing` 的顺序与之一致，前端按顺序问就能逐项补齐。
+    """
+    return {
+        "coverage": round(card.coverage, 4),
+        "sections": [
+            {
+                "key": section.key,
+                "label": section.label,
+                "filled": section.filled,
+                "total": section.total,
+                "fields": [
+                    {
+                        "key": item.key,
+                        "label": item.label,
+                        "question": item.question,
+                        "value": item.value,
+                        "source": item.source,
+                        "span": item.span,
+                        "locked": item.locked,
+                    }
+                    for item in section.fields
+                ],
+            }
+            for section in card.sections
+        ],
+        "missing": [dict(item) for item in card.missing],
     }
 
 
@@ -646,6 +687,19 @@ def list_facts(lead_id: str, service: IngestDep):
     if issues:
         return JSONResponse(status_code=404, content=_issue_body(issues))
     return [_fact_body(fact, model=service.model_for(fact)) for fact in facts]
+
+
+@app.get("/leads/{lead_id}/card")
+def get_lead_card(lead_id: str, service: CardDep):
+    """该线索的信息卡：覆盖度 + 四要素分区 + 缺项问题句；线索不存在 404。
+
+    字段与问题句全部来自该线索自己的模板（`card.sections`），本路由不做任何判断；
+    值来自该客户的事实，没采集到的字段进 `missing`，每项带一句可直接问客户的话。
+    """
+    card, issues = service.card(lead_id)
+    if card is None:
+        return JSONResponse(status_code=404, content=_issue_body(issues))
+    return _card_body(card)
 
 
 @app.patch("/leads/{lead_id}/facts/{field}")
