@@ -12,7 +12,7 @@
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q` → 247 passed；`.\.venv\Scripts\python.exe -m pytest -q tests\test_migration_v2.py` → 全绿；`$env:PYTHONPATH='src'; lint-imports` → 契约全过
   - 预估：6h　依赖：无
 
-- [ ] **[T002] 归属三级漏斗 + 审计日志**
+- [x] **[T002] 归属三级漏斗 + 审计日志**
   - 目标：`domain/matching.py` 实现规范化 → L0 精确键 → L1 字符串（rapidfuzz）→ L2 向量 的短路漏斗，按模板阈值给出 `auto` / `review` / `new_lead`，每次判定带 `scorer` / `score` / `threshold` / 候选列表；L1 ≥95、L2 ≥0.92 都必须有第二字段佐证才自动，向量永不单独授权合并。
   - 涉及文件：`src/salescopilot/domain/matching.py`（新建）、`src/salescopilot/domain/sorting.py`（新建，`card_section_of` 与出库优先级）、`tests/test_matching_domain.py`（新建）、`tests/test_sorting_domain.py`（新建）
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_matching_domain.py tests\test_sorting_domain.py`；`-m pytest -q tests\test_no_industry_words.py`；用例覆盖 L1 94.9/95.0/85.0/84.9 与 L2 0.919/0.92/0.80/0.799 边界

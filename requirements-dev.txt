@@ -7,6 +7,8 @@
 #       openai / python-dotenv 走 B5b 的真模型提炼；chromadb 走 B6 的资料检索。
 #       **chromadb 仅 adapters 使用**：SDK 只允许出现在 adapters/，domain / services
 #       一律不 import（见 .importlinter 与 tests/test_no_industry_words.py）。
+#       **rapidfuzz 仅 domain/matching 使用**：归属漏斗的字符串相似度（T002 引入，
+#       版本以 `pip install rapidfuzz` 实际装到的为准）。
 #       默认测试不联网：向量用 FakeEmbedder、向量库用本地临时目录。
 
 aiohappyeyeballs==2.7.1
@@ -81,6 +83,7 @@ pytest==9.2.0
 python-dateutil==4.0.0
 python-dotenv==1.2.4
 PyYAML==6.0.3
+rapidfuzz==3.14.6
 referencing==0.37.0
 requests==2.34.2
 requests-oauthlib==2.0.0
