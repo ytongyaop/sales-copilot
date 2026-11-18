@@ -7,6 +7,7 @@ import {
   listBatches,
   listLeads,
   listTodo,
+  retryOnce,
   reviewBatch,
   sortContent,
 } from '../api'
@@ -55,6 +56,7 @@ const leads = ref([])
 // 今日待办：顺序与「为什么现在跟」「今天做什么」「给什么」全来自后端 /todo，前端只负责显示。
 const todo = ref([])
 const todoError = ref('')
+const todoLoading = ref(false)
 
 // 投料区
 const content = ref('')
@@ -138,26 +140,33 @@ function setUrlBatch(batchId) {
 
 async function loadLeads() {
   try {
-    leads.value = await listLeads()
+    leads.value = await retryOnce(listLeads)
   } catch (err) {
     error.value = err.message
   }
 }
 
 // 待办取不到只影响这一块（不把投料与分拣单一起拖成白屏）。
+// 失败会自动重试一次（间隔 500ms，见 `api.js` 的 `retryOnce`）：首屏那一次请求最容易
+// 撞上后端还没就绪，本轮重试后仍失败才把错误条显示出来。
 async function loadTodo() {
+  todoLoading.value = true
   try {
-    todo.value = await listTodo()
+    todo.value = await retryOnce(listTodo)
     todoError.value = ''
   } catch (err) {
     todo.value = []
     todoError.value = err.message
+  } finally {
+    todoLoading.value = false
   }
 }
 
 async function loadLists() {
   try {
-    const [poolItems, allItems] = await Promise.all([listBatches('pending_claim'), listBatches()])
+    const [poolItems, allItems] = await retryOnce(() =>
+      Promise.all([listBatches('pending_claim'), listBatches()]),
+    )
     pool.value = poolItems
     recent.value = allItems.slice(0, 10)
   } catch (err) {
@@ -388,8 +397,20 @@ watch(
     <p v-if="notice" class="notice">{{ notice }}</p>
 
     <section class="card">
-      <h2>今日待办 <span class="muted">（{{ todo.length }} 家）</span></h2>
+      <div class="card-head-line">
+        <h2>今日待办 <span class="muted">（{{ todo.length }} 家）</span></h2>
+        <button
+          type="button"
+          class="ghost small"
+          :disabled="todoLoading"
+          title="重新拉一次今日待办"
+          @click="loadTodo"
+        >
+          {{ todoLoading ? '刷新中…' : '刷新' }}
+        </button>
+      </div>
       <p v-if="todoError" class="error">{{ todoError }}</p>
+      <p v-else-if="todoLoading && todo.length === 0" class="hint">加载中…</p>
       <p v-else-if="todo.length === 0" class="hint">今天没有必须跟的客户</p>
       <ul v-else class="todo">
         <li
@@ -983,6 +1004,25 @@ tr.clickable:hover {
 
 tr.clickable.active {
   background: #eef4ff;
+}
+
+/* 今日待办标题行：标题在左、刷新按钮贴右，不把按钮挤到标题下面。 */
+.card-head-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.card-head-line h2 {
+  margin: 0;
+}
+
+button.small {
+  padding: 4px 10px;
+  font-size: 13px;
 }
 
 /* 今日待办：一行一家，左边档位徽标、中间「为什么跟 / 做什么 / 给什么」、右边箭头。 */

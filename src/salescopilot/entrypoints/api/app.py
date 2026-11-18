@@ -519,10 +519,12 @@ def _grading_record_body(record: GradingRecord) -> dict:
 
 
 def _shelf_body(entry: ShelfEntry) -> dict:
-    """货架上的一张客户小卡：名称 / 归属人 / 档位 / 覆盖度 / 缺项数 / 下次约定。
+    """货架上的一张客户小卡：名称 / 归属人 / 档位 / 覆盖度 / 缺项数 / 下次约定 / 风险色点。
 
     字段名与 `domain/shelf.py` 的 `ShelfEntry` 一一对应，不做改名——前端只认一套词。
-    `coverage` 保留 4 位小数（前端画比例条与百分比文字）。
+    `coverage` 保留 4 位小数（前端画比例条与百分比文字）；
+    `reminder_level` 是提醒层的严重度原样透出（`red` / `yellow` / `gray` / 空串），
+    前端只拿它上色，不据此重判超时。
     """
     return {
         "lead_id": entry.lead_id,
@@ -534,6 +536,7 @@ def _shelf_body(entry: ShelfEntry) -> dict:
         "total": entry.total,
         "missing_count": entry.missing_count,
         "next_appointment": entry.next_appointment,
+        "reminder_level": entry.reminder_level,
     }
 
 
@@ -638,6 +641,49 @@ def _template_body(key: str, data: dict) -> dict:
 def list_templates() -> list[dict]:
     """模板清单：名字 + 阶段顺序 + 每块中文名（前端据此算「下一阶段」并显示中文名）。"""
     return [_template_body(key, data) for key, data in templates().items()]
+
+
+def _mapping(value: object) -> dict:
+    """模板里的配置段：是映射就原样透出，缺段或类型不对给空对象（不编默认值）。"""
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _card_field_count(data: dict) -> int:
+    """卡面声明的字段总数：设置页只显示「这家模板要问几项」，不做字段级重算。"""
+    sections = _mapping(data.get("card")).get("sections")
+    if not isinstance(sections, dict):
+        return 0
+    total = 0
+    for section in sections.values():
+        fields = section.get("fields") if isinstance(section, dict) else None
+        if isinstance(fields, list):
+            total += len(fields)
+    return total
+
+
+@app.get("/settings")
+def get_settings() -> dict:
+    """设置页的只读数据：运行模式 + 模型名 + 每份模板的阈值 / 分级 / 卡面字段数。
+
+    只读：不写配置、不热切模式（模式是进程级开关，改它要改 `SALESCOPILOT_LIVE` 并重启）。
+    `thresholds` / `grading` 原样透出模板里的 `thresholds:` / `grading:` 段，
+    前端只负责排版成人话，不在这里翻译或改口径。
+    """
+    info = mode_info()
+    return {
+        "mode": info["mode"],
+        "models": {"chat": info["chat"], "embed": info["embed"]},
+        "templates": [
+            {
+                "key": key,
+                "name": str(data.get("name", "")),
+                "thresholds": _mapping(data.get("thresholds")),
+                "grading": _mapping(data.get("grading")),
+                "card_fields": _card_field_count(data),
+            }
+            for key, data in templates().items()
+        ],
+    }
 
 
 @app.post("/leads", status_code=201)
@@ -1196,10 +1242,15 @@ def weekly_review(service: ReviewDep) -> dict:
     """本周复盘：推进 / 关闭 / 卡点 / 待补全 / 缺项前三 / 分级变动 / 无价值跟进 + 三个问题。
 
     窗口是滚动 7 天（`domain/review.py` 的 `REVIEW_WINDOW_DAYS`），所有数字共用同一个窗口；
-    `answered` 表示这周是否已经答过校准问题，由服务单独判定后拼在这里。
+    `answered` 表示这周是否已经答过校准问题，`answers` 是这周已作答的样本
+    （`[{"key","question","answer","at"}]`，同一个窗口），都由服务判定后拼在这里。
     没有客户时照样 200：数字全 0、问题照给（复盘页永远可打开）。
     """
-    return {**_review_body(service.summary()), "answered": service.answered_this_week()}
+    return {
+        **_review_body(service.summary()),
+        "answered": service.answered_this_week(),
+        "answers": service.answers_this_week(),
+    }
 
 
 @app.post("/review/answers", status_code=201)

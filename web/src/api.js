@@ -41,6 +41,19 @@ function jsonOptions(method, payload) {
   }
 }
 
+// 首屏竞态兜底：vite 代理先起来、后端还在启动时，第一次请求会失败；
+// 隔 500ms 再试一次，仍失败才把错误交给调用方显示（错误条只报「真的连不上」）。
+// 业务校验失败（带 issues 的 422/404）不重试：同样的入参再发一次不会变成功。
+export async function retryOnce(call, delayMs = 500) {
+  try {
+    return await call()
+  } catch (err) {
+    if (err && Array.isArray(err.issues) && err.issues.length > 0) throw err
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    return call()
+  }
+}
+
 export function listLeads() {
   return request('/leads')
 }
@@ -89,6 +102,11 @@ export function createLead(payload) {
 
 export function listTemplates() {
   return request('/templates')
+}
+
+// 设置页：运行模式 + 模型名 + 每份模板的阈值 / 分级 / 卡面字段数（后端只读接口）。
+export function getSettings() {
+  return request('/settings')
 }
 
 export function advanceLead(leadId, targetStage) {

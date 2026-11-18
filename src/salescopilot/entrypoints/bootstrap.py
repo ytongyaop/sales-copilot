@@ -301,15 +301,18 @@ def build_todo_service() -> TodoService:
 
 
 def build_shelf_service() -> ShelfService:
-    """客户货架用例：线索 + 跟进 + 分级留痕三条仓储 ＋ 信息卡用例（覆盖度与缺项直接复用）。
+    """客户货架用例：线索 + 跟进 + 分级留痕三条仓储 ＋ 信息卡用例 ＋ 提醒用例。
 
-    信息卡不重算：货架上的百分比与详情页必须是同一套口径，所以直接把 `CardService` 传进去。
+    信息卡不重算：货架上的百分比与详情页必须是同一套口径，所以直接把 `CardService` 传进去；
+    风险色点同理，取 `ReminderService` 判好的 level，不在货架上再算一遍超时。
     """
     db = default_db_path()
     leads: LeadRepository = SqliteLeadRepository(db)
     followups: FollowupRepository = SqliteFollowupRepository(db)
     history: GradingRepository = SqliteGradingRepository(db)
-    return ShelfService(leads, build_card_service(), followups, history)
+    return ShelfService(
+        leads, build_card_service(), followups, history, reminders=build_reminder_service()
+    )
 
 
 def build_review_service() -> ReviewService:

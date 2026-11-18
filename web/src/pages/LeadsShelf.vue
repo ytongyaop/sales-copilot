@@ -4,12 +4,13 @@ import {
   claimLead,
   createLead,
   getDashboard,
-  importLeads,
   listLeads,
   listPool,
+  listReminders,
   listShelf,
   listTemplates,
   releaseLead,
+  retryOnce,
 } from '../api'
 import {
   SOURCES,
@@ -37,23 +38,34 @@ const leads = ref([])
 const pool = ref([])
 const dashboard = ref(null)
 const templates = ref([])
+// 提醒列表：卡片右上角的色点用 `reminder_level` 上色，hover 的提示语用这里的 message。
+// 判定（红/黄/灰、超过几分钟）全在后端 `GET /reminders`，前端不重算。
+const reminders = ref([])
 
 const keyword = ref('')
 const scope = ref('all') // all | pool
 const loading = ref(false)
 const error = ref('')
 
-// 线索管理（新增 / 导入 / 认领 / 释放）：都是 v1 就有的入口，折叠到页面下方。
+// 线索管理（新增 / 认领 / 释放）：都是 v1 就有的入口，折叠到页面下方。
+// CSV 导入挪到「设置」页（T009b）：货架只管看客户，导入属于配置动作。
 const form = ref({ name: '', contact: '', source: 'referral', owner: '', template: 'edu_training' })
 const submitting = ref(false)
-const importing = ref(false)
-const importResult = ref(null)
-const importError = ref('')
 const busyId = ref('')
 
 const emit = defineEmits(['open-lead'])
 
 const poolIds = computed(() => new Set(pool.value.map((item) => item.id)))
+
+// 线索 id → 提醒：提醒层每条线索最多一条（同一家只报最严重的那个），所以直接摊平。
+const reminderByLead = computed(() =>
+  Object.fromEntries(reminders.value.map((item) => [item.lead_id, item])),
+)
+
+function reminderTitle(card) {
+  const hit = reminderByLead.value[card.lead_id]
+  return hit ? hit.message : '有风险提醒'
+}
 
 const visibleCards = computed(() => {
   let items = shelf.value
@@ -99,16 +111,15 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [cards, leadItems, poolItems, dashboardBody] = await Promise.all([
-      listShelf(),
-      listLeads(),
-      listPool(),
-      getDashboard(),
-    ])
+    // 首屏那一次请求最容易撞上后端还没就绪：整批失败自动重试一次（见 `api.js`）。
+    const [cards, leadItems, poolItems, dashboardBody, reminderItems] = await retryOnce(() =>
+      Promise.all([listShelf(), listLeads(), listPool(), getDashboard(), listReminders()]),
+    )
     shelf.value = cards
     leads.value = leadItems
     pool.value = poolItems
     dashboard.value = dashboardBody
+    reminders.value = reminderItems
   } catch (err) {
     error.value = err.message
   } finally {
@@ -118,7 +129,7 @@ async function load() {
 
 async function loadTemplates() {
   try {
-    templates.value = await listTemplates()
+    templates.value = await retryOnce(listTemplates)
   } catch (err) {
     error.value = err.message
   }
@@ -144,35 +155,6 @@ async function submit() {
     error.value = err.message
   } finally {
     submitting.value = false
-  }
-}
-
-function readFileText(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(new Error('读取文件失败，请确认这是一个文本 CSV 文件'))
-    reader.readAsText(file, 'utf-8')
-  })
-}
-
-async function onImportFile(event) {
-  const input = event.target
-  const file = input.files && input.files[0]
-  if (!file) return
-
-  importError.value = ''
-  importResult.value = null
-  importing.value = true
-  try {
-    const text = await readFileText(file)
-    importResult.value = await importLeads(text, null)
-    await load()
-  } catch (err) {
-    importError.value = err.message || '导入失败，请重试'
-  } finally {
-    importing.value = false
-    input.value = ''
   }
 }
 
@@ -309,6 +291,13 @@ onMounted(async () => {
             title="打开客户详情"
             @click="openCard(card)"
           >
+            <!-- 风险色点：颜色来自后端 `reminder_level`，hover 的提示语来自 `GET /reminders` 的那条 message。 -->
+            <span
+              v-if="card.reminder_level"
+              class="risk-dot"
+              :class="card.reminder_level"
+              :title="reminderTitle(card)"
+            ></span>
             <div class="lead-card-head">
               <strong>{{ card.name }}</strong>
               <span class="grade-badge" :class="gradeClass(card.grade)">
@@ -331,7 +320,7 @@ onMounted(async () => {
     </section>
 
     <details class="card manage">
-      <summary><h2 class="inline-title">线索管理（新增 / 导入 / 认领 / 释放）</h2></summary>
+      <summary><h2 class="inline-title">线索管理（新增 / 认领 / 释放）</h2></summary>
 
       <h3>新增线索</h3>
       <form class="form" @submit.prevent="submit">
@@ -367,28 +356,6 @@ onMounted(async () => {
           {{ submitting ? '提交中…' : '新增' }}
         </button>
       </form>
-
-      <h3>导入 CSV</h3>
-      <p class="hint">
-        支持带表头（姓名 / 联系方式 / 来源 / 归属），也支持无表头（列序：姓名,联系方式,来源,归属）；
-        同一联系方式只会导入一次（去重在后端）。
-      </p>
-      <div class="row-actions">
-        <input type="file" accept=".csv,text/csv" :disabled="importing" @change="onImportFile" />
-        <span v-if="importing" class="muted">导入中…</span>
-      </div>
-      <p v-if="importError" class="error">{{ importError }}</p>
-      <div v-if="importResult" class="import-result">
-        <p>导入 {{ importResult.imported }} 条，跳过 {{ importResult.skipped.length }} 条。</p>
-        <details v-if="importResult.skipped.length">
-          <summary class="muted">查看跳过原因</summary>
-          <ul class="skip-list">
-            <li v-for="(item, index) in importResult.skipped" :key="index" class="muted">
-              第 {{ item.row }} 行：{{ item.reason }}
-            </li>
-          </ul>
-        </details>
-      </div>
 
       <h3>归属（认领 / 释放）</h3>
       <p v-if="leads.length === 0" class="hint">还没有客户。</p>
@@ -492,6 +459,15 @@ onMounted(async () => {
   background: #fff;
   cursor: pointer;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  /* 风险色点绝对定位在右上角，所以卡片自己要有定位上下文。 */
+  position: relative;
+}
+
+/* 右上角的色点：颜色只表达后端给的级别，不在这上面写字（悬停提示给的是那句话本身）。 */
+.lead-card .risk-dot {
+  position: absolute;
+  top: 10px;
+  right: 10px;
 }
 
 .lead-card:hover {
@@ -504,6 +480,8 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  /* 给右上角的色点让位，免得和档位徽标叠在一起。 */
+  padding-right: 12px;
 }
 
 .owner {
@@ -642,21 +620,5 @@ onMounted(async () => {
 
 .risk-dot.gray {
   background: #8a939d;
-}
-
-.import-result {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid #e1e4e8;
-  border-radius: 6px;
-  background: #fafbfc;
-  font-size: 14px;
-}
-
-.skip-list {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  font-size: 12px;
-  line-height: 1.7;
 }
 </style>

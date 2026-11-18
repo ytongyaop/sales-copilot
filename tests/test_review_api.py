@@ -29,6 +29,7 @@ REVIEW_KEYS = {
     "no_value_followups",
     "questions",
     "answered",
+    "answers",
 }
 
 
@@ -61,6 +62,7 @@ def test_review_is_empty_before_any_data(client: TestClient) -> None:
     assert body["no_value_followups"] == []
     assert [item["key"] for item in body["questions"]] == ["b_to_a", "c_kept", "wrong_grade"]
     assert body["answered"] is False
+    assert body["answers"] == []
     assert body["window_start"] and body["window_end"]
 
 
@@ -103,7 +105,16 @@ def test_answer_three_questions_then_answered_is_true(client: TestClient) -> Non
 
     assert saved.status_code == 201, saved.text
     assert saved.json() == {"saved": 3}
-    assert client.get("/review").json()["answered"] is True
+    body = client.get("/review").json()
+    assert body["answered"] is True
+    # 已作答的样本原样还给前端：编号由问题中文反查回来，回答与时间都在。
+    assert [item["key"] for item in body["answers"]] == ["b_to_a", "c_kept", "wrong_grade"]
+    assert [item["answer"] for item in body["answers"]] == [
+        item["answer"] for item in payload["answers"]
+    ]
+    assert [item["question"] for item in body["answers"]] == [
+        item["text"] for item in body["questions"]
+    ]
 
 
 @pytest.mark.parametrize(

@@ -122,8 +122,30 @@ class ReviewService:
 
     def answered_this_week(self) -> bool:
         """本周（同一窗口）是否已经答过：只要有一行样本落在窗口内就算答过。"""
+        return bool(self.answers_this_week())
+
+    def answers_this_week(self) -> list[dict]:
+        """本周已作答的样本：`[{"key","question","answer","at"}]`，按作答时间正序。
+
+        - 窗口与复盘数字同一个（`review_window`），不放宽也不另算一次「本周」；
+        - `key` 由问题中文反查 `QUESTION_TEXTS`：样本表里存的是人话问题，接口要还给前端编号；
+          反查不到（历史上存过别的问题句）就给空串，不猜它属于哪一问；
+        - 只读：本方法不写库，作答入口仍然只有 `answer()`。
+        """
         start, end = review_window(self._now())
-        return any(within_window(sample.at, start, end) for sample in self._samples.list_all())
+        key_of = {text: key for key, text in QUESTION_TEXTS.items()}
+        items = [
+            {
+                "key": key_of.get(sample.question.strip(), ""),
+                "question": sample.question,
+                "answer": sample.answer,
+                "at": sample.at,
+            }
+            for sample in self._samples.list_all()
+            if within_window(sample.at, start, end)
+        ]
+        items.sort(key=lambda item: item["at"])
+        return items
 
     # -------------------------------------------------------------- 内部动作
 

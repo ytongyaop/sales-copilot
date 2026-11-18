@@ -20,7 +20,9 @@ class ShelfEntry:
     - `grade`：`domain/grading.current_value` 的结果（`unknown` 表示还没分级，页面归「待分级」）；
     - `coverage`：信息卡覆盖度（0..1）；`filled` / `total` 是它的分子分母，页面画比例条用；
     - `missing_count`：信息卡还缺几个字段（与缺项问题句同一个清单）；
-    - `next_appointment`：最近一次跟进里的下次约定日期；没有就是空串。
+    - `next_appointment`：最近一次跟进里的下次约定日期；没有就是空串；
+    - `reminder_level`：卡片右上角那个色点用的严重度（`red` / `yellow` / `gray`），
+      由 `domain/reminders.py` 判定后**原样带过来**，本层不重判超时；没有提醒就是空串。
     """
 
     lead_id: str
@@ -32,10 +34,22 @@ class ShelfEntry:
     total: int
     missing_count: int
     next_appointment: str
+    reminder_level: str = ""
 
 
-def build_entry(*, lead: Lead, card: Card, grade: str, followups: list[Followup]) -> ShelfEntry:
-    """拼一张小卡：客户的名称 / 归属人 + 信息卡的两个数 + 下次约定。"""
+def build_entry(
+    *,
+    lead: Lead,
+    card: Card,
+    grade: str,
+    followups: list[Followup],
+    reminder_level: str = "",
+) -> ShelfEntry:
+    """拼一张小卡：客户的名称 / 归属人 + 信息卡的两个数 + 下次约定 + 提醒严重度。
+
+    `reminder_level` 由调用方从提醒用例取来传入（没有提醒用默认空串）：
+    货架只负责把它画成色点，判定口径仍然只有 `domain/reminders.py` 一处。
+    """
     return ShelfEntry(
         lead_id=lead.id,
         name=lead.name,
@@ -46,6 +60,7 @@ def build_entry(*, lead: Lead, card: Card, grade: str, followups: list[Followup]
         total=sum(section.total for section in card.sections),
         missing_count=len(card.missing),
         next_appointment=next_appointment(followups),
+        reminder_level=reminder_level,
     )
 
 

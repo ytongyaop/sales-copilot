@@ -23,11 +23,35 @@ const health = ref(null)
 
 // 模式徽标只在最外层取一次：四个页签看到的必须是同一个「真/假模型」，
 // 否则同一块屏幕上会同时出现两个互相矛盾的模式说法。
-async function loadHealth() {
-  try {
-    health.value = await getHealth()
-  } catch {
-    health.value = null
+// 首屏门禁：**先确认后端活着，再挂载各页**。
+// 各页都在 `onMounted` 里自己取数，如果和 `/health` 同时发出去，后端（尤其是带 --reload 的
+// uvicorn）还没就绪的那 1–3 秒里第一批请求就会失败，页面停在「0 家 / 空列表」且不再自愈，
+// 必须切页签才会重取。先问一次 `/health` 把这批请求挡在后面，竞态就没有了。
+const ready = ref(false)
+const bootError = ref('')
+
+// 后端刚起来的那几秒 `/health` 也会连不上：最多试 6 次（间隔 500ms），
+// 仍失败才把「服务未连接」显示出来并留一个「重试」按钮。
+const BOOT_ATTEMPTS = 6
+const BOOT_INTERVAL_MS = 500
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function boot() {
+  bootError.value = ''
+  ready.value = false
+  for (let attempt = 1; attempt <= BOOT_ATTEMPTS; attempt += 1) {
+    try {
+      health.value = await getHealth()
+      ready.value = true
+      return
+    } catch (err) {
+      health.value = null
+      if (attempt === BOOT_ATTEMPTS) bootError.value = err.message
+      else await wait(BOOT_INTERVAL_MS)
+    }
   }
 }
 
@@ -49,7 +73,7 @@ function isActive(key) {
   return detailLeadId.value === '' && tab.value === key
 }
 
-onMounted(loadHealth)
+onMounted(boot)
 </script>
 
 <template>
@@ -74,6 +98,7 @@ onMounted(loadHealth)
           type="button"
           class="tab"
           :class="{ active: isActive(item.key) }"
+          :disabled="!ready"
           @click="switchTab(item.key)"
         >
           {{ item.label }}
@@ -81,21 +106,34 @@ onMounted(loadHealth)
       </nav>
     </header>
 
-    <SortingDesk
-      v-show="isActive('sorting')"
-      :active="isActive('sorting')"
-      @open-lead="openLead"
-    />
-    <LeadsShelf v-show="isActive('leads')" :active="isActive('leads')" @open-lead="openLead" />
-    <ReviewPage v-show="isActive('review')" :active="isActive('review')" />
-    <SettingsPage v-show="isActive('settings')" :active="isActive('settings')" :health="health" />
+    <p v-if="bootError" class="error boot">
+      {{ bootError }}
+      <button type="button" class="link-button" @click="boot">重试</button>
+    </p>
+    <p v-else-if="!ready" class="hint boot">正在连接后端…</p>
 
-    <LeadDetail
-      v-if="detailLeadId"
-      :key="detailLeadId"
-      :lead-id="detailLeadId"
-      @back="closeDetail"
-    />
+    <!-- 后端确认可用之后才挂载各页：它们的首屏请求不会再跑在还没就绪的服务前面。 -->
+    <template v-if="ready">
+      <SortingDesk
+        v-show="isActive('sorting')"
+        :active="isActive('sorting')"
+        @open-lead="openLead"
+      />
+      <LeadsShelf v-show="isActive('leads')" :active="isActive('leads')" @open-lead="openLead" />
+      <ReviewPage v-show="isActive('review')" :active="isActive('review')" />
+      <SettingsPage
+        v-show="isActive('settings')"
+        :active="isActive('settings')"
+        :health="health"
+      />
+
+      <LeadDetail
+        v-if="detailLeadId"
+        :key="detailLeadId"
+        :lead-id="detailLeadId"
+        @back="closeDetail"
+      />
+    </template>
   </main>
 </template>
 
@@ -144,5 +182,10 @@ onMounted(loadHealth)
   border-bottom-color: #1f6feb;
   color: #1f6feb;
   font-weight: 600;
+}
+
+/* 连接后端那一条：不摆成错误，只在还没就绪时占一行，免得页面看起来是空的。 */
+.boot {
+  margin: 8px 0 16px;
 }
 </style>

@@ -3,6 +3,8 @@
 分工固定：
 - 覆盖度与缺项数是 `domain/card.py` 的产出：本层直接复用 `CardService`，不另算一遍；
 - 档位口径是 `domain/grading.current_value`（人工值优先），与今日待办、详情页同源；
+- 卡右上角的风险色点取 `ReminderService.list_all()` 的 `level`：超时判定只有
+  `domain/reminders.py` 一处，货架不另算一遍「几天没跟」；
 - 本层只做取数与拼装，不写库、不认识 SQLite，也不认识任何行业字段。
 
 为什么要有这个只读接口：货架要「每家一行覆盖度 + 档位」，让浏览器逐家去问就是 3N 次请求，
@@ -13,6 +15,7 @@ from salescopilot.domain.grading import current_value
 from salescopilot.domain.ports import FollowupRepository, GradingRepository, LeadRepository
 from salescopilot.domain.shelf import ShelfEntry, build_entry
 from salescopilot.services.card import CardService
+from salescopilot.services.reminder_service import ReminderService
 
 
 class ShelfService:
@@ -24,18 +27,25 @@ class ShelfService:
         cards: CardService,
         followups: FollowupRepository,
         grading_history: GradingRepository,
+        reminders: ReminderService | None = None,
     ) -> None:
-        """信息卡用 `CardService`（模板声明 + 事实），货架不重新实现覆盖度。"""
+        """信息卡用 `CardService`（模板声明 + 事实），货架不重新实现覆盖度。
+
+        `reminders` 可省略（测试或只用货架数字时）：省略就等于「每张卡都没有风险色点」，
+        不会在货架里冒出一套自己的超时判定。
+        """
         self._leads = leads
         self._cards = cards
         self._followups = followups
         self._grading_history = grading_history
+        self._reminders = reminders
 
     def list(self) -> list[ShelfEntry]:
         """全部客户的小卡，顺序与 `GET /leads` 一致（创建时间倒序）。
 
         模板缺失（磁盘上没有这份模板）的客户跳过：算不出覆盖度就不摆一张数字骗人的卡。
         """
+        levels = self._reminder_levels()
         entries: list[ShelfEntry] = []
         for lead in self._leads.list():
             card, _issues = self._cards.card(lead.id)
@@ -47,6 +57,13 @@ class ShelfService:
                     card=card,
                     grade=current_value(self._grading_history.list_for(lead.id)),
                     followups=self._followups.list_for(lead.id),
+                    reminder_level=levels.get(lead.id, ""),
                 )
             )
         return entries
+
+    def _reminder_levels(self) -> dict[str, str]:
+        """线索 id → 提醒严重度：提醒层每条线索最多一条，直接摊平即可，不在这里挑轻重。"""
+        if self._reminders is None:
+            return {}
+        return {item.lead_id: item.level for item in self._reminders.list_all()}

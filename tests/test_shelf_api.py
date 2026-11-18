@@ -33,7 +33,10 @@ SHELF_KEYS = {
     "total",
     "missing_count",
     "next_appointment",
+    "reminder_level",
 }
+# 风险色点只用这四个取值（空串 = 没有提醒）：判定在 `domain/reminders.py`，这里只验形状。
+REMINDER_LEVELS = {"", "red", "yellow", "gray"}
 
 
 @pytest.fixture
@@ -75,6 +78,9 @@ def test_shelf_card_reflects_card_coverage_and_grade(client: TestClient) -> None
     assert card["total"] == CARD_FIELD_TOTAL
     assert card["missing_count"] == CARD_FIELD_TOTAL
     assert card["next_appointment"] == ""
+    # 刚建的客户还在首响时限内、也没有跟进 → 没有提醒，色点为空（取值必须在这四个之内）。
+    assert card["reminder_level"] in REMINDER_LEVELS
+    assert card["reminder_level"] == ""
 
     # 补两条卡面声明过的事实：覆盖度变成 2/10，缺项数同步减 2。
     for field, value in {"decision_maker": "王总", "need": "要一套订单系统"}.items():
