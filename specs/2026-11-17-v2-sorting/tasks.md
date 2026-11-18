@@ -24,6 +24,12 @@
   - 验收命令：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --dry-run` 打印 50 对上的阈值扫描表与建议值；`.\.venv\Scripts\python.exe -m pytest -q tests\test_calibrate_thresholds.py`
   - 预估：3h　依赖：T002
 
+- [x] **[T002c] 校准补全（funnel 模型）+ 键名统一 + 人读报告**
+  - 目标：`calibrate_thresholds.py` 增 `--model funnel`（L0 精确键 → `suffix_only` 复核 → L1 阈值），与 `l1` 并列输出；模板阈值键统一为 `matching:` 嵌套段（`l1_auto` / `l1_review`，重复写不追加）；产出人读报告 `data/reports/matching_calibration.md`（样本构成、95 分 3 对误配、结论与局限）。
+  - 涉及文件：`scripts/calibrate_thresholds.py`、`tests/test_calibrate_thresholds.py`（新建）、`data/reports/matching_calibration.md`（新建）、`docs/进度.md`、`specs/2026-11-17-v2-sorting/plan.md`
+  - 验收命令：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --model funnel`；`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --json %TEMP%\cal2.json`；`.\.venv\Scripts\python.exe -m pytest -q` 全绿
+  - 预估：2h　依赖：T002b
+
 - [ ] **[T003] 一次投料 → 分拣单（fake LLM + 出处对齐校验）**
   - 目标：`POST /sorting` 一次投料产出含归属 / 要素 / 分级 / 出库四块的分拣单，每块带能在原文定位到的 `source_span`；归属只在 `band='review'` 且候选 ≤3 时调 LLM 复核（其余档位不调，可断言调用次数）；`source_span` 落库前过 `domain/span_align.py`，对不上的字段丢弃并记 `span_misaligned` 诊断。
   - 涉及文件：`src/salescopilot/adapters/llm/prompts_sorting.py`（新建）、`src/salescopilot/domain/span_align.py`（新建）、`src/salescopilot/adapters/llm/fake.py`、`src/salescopilot/adapters/llm/deepseek.py`、`src/salescopilot/domain/ports.py`、`src/salescopilot/services/sorting.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_sorting_service.py`（新建）、`tests/test_sorting_api.py`（新建）、`tests/test_span_align.py`（新建）

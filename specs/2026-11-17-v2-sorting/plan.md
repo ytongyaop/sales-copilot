@@ -61,8 +61,8 @@
 
 - **改动清单**
   - `data/evalsets/entity_pairs.jsonl`（新建）—— **50 对**人工标注的客户对子，字段 `pair_id` / `left` / `right` / `label`（`same` | `different`）/ `support`（地区 / 行业 / 联系人等佐证是否一致）/ `note`；难例配比写进文件头注释：繁简 10 对、全称 vs 简称 10 对、同名不同公司 15 对、同公司换联系人 15 对。
-  - `scripts/calibrate_thresholds.py`（新建）—— 读该 jsonl → 逐对算 L1（rapidfuzz）与 L2（cos）分数 → 在候选阈值网格上扫 **precision / recall / F1**（`same` 为正类）→ 打印阈值扫描表与建议值（`l1_auto` 取 precision ≥ 0.99 的最小阈值，`l1_review` 取 recall ≥ 0.95 的最大阈值，`l2_*` 同法）→ `--write <模板路径>` 时只改 `matching:` 段这几个键，其余一字不动；`--dry-run` 只打印。
-  - `data/reports/matching_calibration.md`（由脚本生成，不入代码逻辑）—— 校准报告：样本数、阈值表、选定值、误配 / 漏配各举 1 例。
+  - `scripts/calibrate_thresholds.py`（新建）—— 读该 jsonl → 逐对算 L1（rapidfuzz）与 L2（cos）分数 → 在候选阈值网格上扫 **precision / recall / F1**（`same` 为正类）→ 打印阈值扫描表与建议值（`l1_auto` 取 precision ≥ 0.99 的最小阈值，`l1_review` 取 recall ≥ 0.95 的最大阈值，`l2_*` 同法）→ `--write-template <模板名>` 时只改 `matching:` 段这几个键（嵌套段 `l1_auto` / `l1_review`，重复写不追加），其余一字不动；默认只打印，`--model l1|funnel|both` 切换判定口径（`funnel` 含 L0 精确键）。
+  - `data/reports/matching_calibration.md`（新建，人读报告；数字取自脚本输出，不进代码逻辑）—— 校准报告：样本构成、两套模型的阈值表与选定值、95 分处误配明细、结论与局限。
   - `requirements-dev.txt`（修改）—— 追加 `rapidfuzz==<实际装到的版本>`。
   - `tests/test_calibrate_thresholds.py`（新建）—— 只测纯函数（阈值扫描 / 建议值选择），不联网、不读真库。
 - **验证**：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --dry-run` 打印 50 对上的扫描表与建议阈值；`-m pytest -q tests\test_calibrate_thresholds.py`。
