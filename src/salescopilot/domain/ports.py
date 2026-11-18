@@ -6,6 +6,7 @@
 from typing import Protocol
 
 from salescopilot.domain.knowledge import Chunk
+from salescopilot.domain.matching import Candidate
 from salescopilot.domain.models import (
     AssignmentEvent,
     Draft,
@@ -19,6 +20,7 @@ from salescopilot.domain.models import (
     PreferenceSample,
     RawItem,
     SortingBatch,
+    SortingResult,
     StageEvent,
 )
 
@@ -157,6 +159,21 @@ class PreferenceSampleRepository(Protocol):
     def add(self, sample: PreferenceSample) -> None: ...
 
     def list_all(self) -> list[PreferenceSample]: ...
+
+
+class SortingJudge(Protocol):
+    """分拣判断端口：只知道「原文 + 归属灰区候选」，返回三块建议与产出证据。
+
+    - 要素 / 分级 / 出库三块一次给：`SortingResult.payload` 的键是
+      `elements` / `grading` / `next_action`；每块合不合规由 `domain/sorting.py` 判，
+      模型说「有出处」不算数，对不上原文的要素一律丢弃。
+    - `candidates` 只在归属落在灰区（`band='review'`）且候选 ≤3 时非空：那是「这票货
+      可能是哪几家」，供模型参考。精确键命中或判为新客户时**不传**，模型也就不会
+      被问归属——调用方可据实现里的计数断言这一点。
+    失败（网络、超时、输出解析不了）一律抛 `domain/errors.py` 的 `SortingError`。
+    """
+
+    def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult: ...
 
 
 class Embedder(Protocol):

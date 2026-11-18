@@ -6,6 +6,7 @@
 """
 
 from collections.abc import Iterator
+from dataclasses import asdict
 from typing import Annotated
 
 from fastapi import Depends, FastAPI
@@ -28,6 +29,7 @@ from salescopilot.domain.models import (
 )
 from salescopilot.domain.reminders import Reminder
 from salescopilot.domain.rules import ValidationIssue
+from salescopilot.domain.sorting import SortingSuggestion
 from salescopilot.entrypoints.bootstrap import (
     build_assignment_service,
     build_dashboard_service,
@@ -39,6 +41,7 @@ from salescopilot.entrypoints.bootstrap import (
     build_lead_service,
     build_reclaim_service,
     build_reminder_service,
+    build_sorting_service,
     check_live_config,
     mode_info,
     templates,
@@ -52,6 +55,7 @@ from salescopilot.services.import_service import ImportService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
+from salescopilot.services.sorting import SortingService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
 
@@ -141,6 +145,17 @@ class ImportIn(BaseModel):
     default_owner: str | None = None
 
 
+class SortingIn(BaseModel):
+    """POST /sorting 的请求体：一段原文 + 来源 + 可选的已知线索。
+
+    `lead_id` 给了就是「这票货已经确定是哪家」；不给就走归属漏斗，灰区进待认领池。
+    """
+
+    content: str
+    source: str
+    lead_id: str | None = None
+
+
 def get_lead_service() -> Iterator[LeadService]:
     """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
 
@@ -185,6 +200,10 @@ def get_import_service() -> Iterator[ImportService]:
     yield build_import_service()
 
 
+def get_sorting_service() -> Iterator[SortingService]:
+    yield build_sorting_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -195,6 +214,7 @@ ReminderDep = Annotated[ReminderService, Depends(get_reminder_service)]
 ReclaimDep = Annotated[ReclaimService, Depends(get_reclaim_service)]
 DashboardDep = Annotated[DashboardService, Depends(get_dashboard_service)]
 ImportDep = Annotated[ImportService, Depends(get_import_service)]
+SortingDep = Annotated[SortingService, Depends(get_sorting_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -685,3 +705,68 @@ def discard_draft(lead_id: str, draft_id: str, service: DraftDep):
     if draft is None:
         return JSONResponse(status_code=_draft_status(issues), content=_issue_body(issues))
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------- 分拣单
+
+
+def _suggestion_body(suggestion: SortingSuggestion | None) -> dict | None:
+    """已校验的三块建议：要素（已过滤）/ 分级（已兜底）/ 出库建议（已按缺项重算）。
+
+    与分拣单里的 `suggestion_json`（模型原文）刻意不同：这里是给人看的版本。
+    """
+    if suggestion is None:
+        return None
+    raw = asdict(suggestion)
+    return {
+        "elements": raw["elements"],
+        "grading": raw["grading"],
+        "next_action": raw["next_action"],
+    }
+
+
+@app.post("/sorting", status_code=201)
+def submit_sorting(payload: SortingIn, service: SortingDep):
+    """一次投料 → 一张分拣单：201 返回归属 / 要素 / 分级 / 出库四块与丢弃记录。
+
+    归属：传了 `lead_id` 就是它；没传则跑三级漏斗，只有精确键命中才自动归属，
+    灰区与新客户一律进待认领池（`status=pending_claim`，`lead_id` 为 null）。
+    原文不合格、模型失败或没有任何可用要素时 422（线索不存在 404），不生成分拣单。
+    """
+    outcome = service.sort(content=payload.content, source=payload.source, lead_id=payload.lead_id)
+    if outcome.batch is None:
+        status = 404 if any(issue.location == "lead_id" for issue in outcome.issues) else 422
+        return JSONResponse(status_code=status, content=_issue_body(outcome.issues))
+
+    batch = outcome.batch
+    return {
+        "batch_id": batch.id,
+        "status": batch.status,
+        "lead_id": batch.lead_id,
+        "confidence": batch.confidence,
+        "scorer": batch.scorer,
+        "created_at": batch.created_at,
+        "suggestion": _suggestion_body(outcome.suggestion),
+        "dropped": outcome.dropped,
+    }
+
+
+@app.get("/sorting/batches")
+def list_sorting_batches(service: SortingDep, status: str | None = None, limit: int = 50):
+    """分拣单列表（新→旧）：`status` 可过滤（如 `pending_claim` 即待认领池）。
+
+    每条带 `lead_name`（归属未定时为 null）；状态不认识或 `limit` 越界时 422。
+    """
+    items, issues = service.list_batches(status=status, limit=limit)
+    if issues:
+        return JSONResponse(status_code=422, content=_issue_body(issues))
+    return items
+
+
+@app.get("/sorting/batches/{batch_id}")
+def get_sorting_batch(batch_id: str, service: SortingDep):
+    """单张分拣单：带模型原文（`suggestion_json`）与解析后的视图（`suggestion`）。"""
+    body, issues = service.get_batch(batch_id)
+    if body is None:
+        return JSONResponse(status_code=404, content=_issue_body(issues))
+    return body

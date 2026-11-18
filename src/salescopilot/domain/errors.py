@@ -19,3 +19,7 @@ class DraftError(Exception):
 
 class KnowledgeError(Exception):
     """资料索引不可用：索引模型与当前配置不一致（需要重建），或索引文件读不出来。"""
+
+
+class SortingError(Exception):
+    """分拣判断失败：网络、超时，或模型输出解析不了。消息是给人看的中文，不带密钥。"""

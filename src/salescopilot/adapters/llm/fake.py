@@ -15,7 +15,9 @@ import hashlib
 import json
 import re
 
-from salescopilot.domain.models import ExtractionResult, Fact, RawItem
+from salescopilot.adapters.llm.prompts_sorting import SORTING_PROMPT_VERSION
+from salescopilot.domain.matching import Candidate
+from salescopilot.domain.models import ExtractionResult, Fact, RawItem, SortingResult
 
 DEFAULT_CONFIDENCE = 0.8
 
@@ -114,3 +116,158 @@ def _first_amount(content: str) -> str | None:
     if match is not None and match.group(0).strip():
         return match.group(0).strip()
     return _first_hit(content, _AMOUNT_WORDS)
+
+
+# --------------------------------------------------------------- 分拣判断（T003）
+
+# 句读切分：分拣用的片段以「一句」为单位，切完仍是原文子串，可以直接当出处。
+_SENTENCE_SPLIT = re.compile(r"[，。；！？\n]")
+
+# 组织形式：与 `domain/matching.py` 的后缀表同口径（这里只用来切出名字片段）。
+_ORG_SPAN = re.compile(
+    r"[\u4e00-\u9fa5A-Za-z0-9()（）]{2,20}?(?:股份有限公司|有限责任公司|有限公司|集团|公司)"
+)
+
+_SORTING_NEED_WORDS = ("预算", "价格", "需求", "贵", "便宜", "考虑")
+_SORTING_ROLE_WORDS = ("老板", "负责人", "经理", "主任", "总监")
+_SORTING_TIME_WORDS = ("下周", "明天", "之后", "下个月", "周一", "周二", "周三")
+
+
+class FakeSorting:
+    """关键词分拣器：按固定规则产出 2–4 条要素 + 一个分级 + 一个出库建议。
+
+    - 每条要素的 `source_span` 都是原文里真实存在的**整句**（≥4 字），
+      用例层因此能把它们一条不落地对齐回去；
+    - `bad_span=True` 时故意多吐一条原文里根本没有的要素，用来反证「编造的出处必被丢弃」；
+    - `calls` / `review_calls` 是调用计数：`review_calls` 只在**归属灰区**（调用方传了
+      候选）时加一，用来断言「精确键命中时模型没被问过归属」。
+    """
+
+    def __init__(self, *, bad_span: bool = False) -> None:
+        self._bad_span = bad_span
+        self.calls = 0
+        self.review_calls = 0
+        self.last_candidates: list[Candidate] = []
+
+    def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult:
+        self.calls += 1
+        if candidates:
+            self.review_calls += 1
+            self.last_candidates = list(candidates)
+
+        elements = _sorting_elements(content)
+        if self._bad_span:
+            # 故意引用一句原文里没有的话：用例层必须丢掉它并在 dropped 里报出来。
+            elements.append(
+                {
+                    "card_section": "decision",
+                    "field": "approval_flow",
+                    "value": "需要总部集中审批",
+                    "source_span": "客户说下个月总部一定会批",
+                    "confidence": 0.95,
+                }
+            )
+
+        payload = {
+            "elements": elements,
+            "grading": _sorting_grading(elements),
+            "next_action": _sorting_next_action(elements),
+        }
+        return SortingResult(
+            payload=payload,
+            raw_text=json.dumps(payload, ensure_ascii=False),
+            model=MODEL_NAME,
+            prompt_version=SORTING_PROMPT_VERSION,
+            token=0,
+            seconds=0.0,
+        )
+
+
+def _sorting_elements(content: str) -> list[dict]:
+    """按固定顺序抽要素：基础信息 → 需求 → 决策 → 跟进；抽不到就不给这一条。"""
+    elements: list[dict] = []
+
+    org = _first_sentence_match(content, _ORG_SPAN)
+    if org is not None:
+        elements.append(_element("basic", "company", org, org, 0.9))
+
+    need = _first_sentence_with(content, _SORTING_NEED_WORDS)
+    if need is not None:
+        elements.append(_element("needs", "need", need, need, DEFAULT_CONFIDENCE))
+
+    role_segment = _first_sentence_with(content, _SORTING_ROLE_WORDS)
+    if role_segment is not None:
+        role = next(word for word in _SORTING_ROLE_WORDS if word in role_segment)
+        elements.append(
+            _element("decision", "decision_maker", role, role_segment, DEFAULT_CONFIDENCE)
+        )
+
+    time_segment = _first_sentence_with(content, _SORTING_TIME_WORDS)
+    if time_segment is not None:
+        when = next(word for word in _SORTING_TIME_WORDS if word in time_segment)
+        elements.append(
+            _element("followup", "appointment_at", when, time_segment, DEFAULT_CONFIDENCE)
+        )
+
+    return elements
+
+
+def _first_sentence_with(content: str, words: tuple[str, ...]) -> str | None:
+    """第一个「含这些词」且够长的句子（原文子串）；找不到返回 None。"""
+    for sentence in _SENTENCE_SPLIT.split(content):
+        text = sentence.strip()
+        if len(text) >= 4 and any(word in text for word in words):
+            return text
+    return None
+
+
+def _first_sentence_match(content: str, pattern: re.Pattern[str]) -> str | None:
+    """按句切开后，第一个能匹配 `pattern` 的片段（避免把主语一起吞进名字）。"""
+    for sentence in _SENTENCE_SPLIT.split(content):
+        match = pattern.search(sentence.strip())
+        if match is not None:
+            return match.group(0)
+    return None
+
+
+def _sorting_grading(elements: list[dict]) -> dict:
+    """按要素覆盖度给 A/B/C：需求 + 决策都有 → A；只有需求 → B；其余 → C。"""
+    sections = {element["card_section"] for element in elements}
+    if "needs" in sections and "decision" in sections:
+        value, reason = "A", "需求与决策两块都有原文依据"
+    elif "needs" in sections:
+        value, reason = "B", "只有需求依据，决策链还没落实"
+    else:
+        value, reason = "C", "要素太少，先把基础信息补齐"
+    return {
+        "value": value,
+        "reason": reason,
+        "basis": [element["source_span"] for element in elements[:2]],
+    }
+
+
+def _sorting_next_action(elements: list[dict]) -> dict:
+    """给一条出库建议（模型侧的那份；用例层会按缺项规则重算，这里只需形状合法）。"""
+    sections = {element["card_section"] for element in elements}
+    if "decision" in sections:
+        action = "按约定时间再确认一次决策流程"
+    else:
+        action = "补问谁拍板、钱从哪出"
+    return {
+        "action": action,
+        "value_offered": elements[0]["value"] if elements else "",
+        "due_hint": next(
+            (element["value"] for element in elements if element["card_section"] == "followup"),
+            "",
+        ),
+    }
+
+
+def _element(section: str, field: str, value: str, span: str, confidence: float) -> dict:
+    return {
+        "card_section": section,
+        "field": field,
+        "value": value,
+        "source_span": span,
+        "confidence": confidence,
+    }

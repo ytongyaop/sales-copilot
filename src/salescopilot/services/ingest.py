@@ -42,6 +42,51 @@ MIN_CONTENT_LEN = 10
 MANUAL_SOURCE_SPAN = "(人工录入)"
 
 
+def register_raw_item(
+    raws: RawItemRepository,
+    *,
+    lead_id: str,
+    content: str,
+    source: str,
+    clock: Callable[[], str],
+) -> tuple[RawItem | None, bool, list[ValidationIssue]]:
+    """登记一条原始素材（幂等）：返回（素材, 是否重复, 问题列表）。
+
+    这是「同一线索同一段内容只入库一次」的唯一实现，`IngestService.ingest` 与分拣用例
+    都走这里，两处不会长出两套去重口径。
+
+    **线索是否存在不在这里判**：分拣时归属未定，原文要先落下来（待认领），
+    调用方负责先确认线索，再把已确定的 `lead_id` 传进来（未定就传空串）。
+    """
+    text = content.strip() if isinstance(content, str) else ""
+    source_text = source.strip() if isinstance(source, str) else ""
+    issues: list[ValidationIssue] = []
+    if not text:
+        issues.append(ValidationIssue("content", "内容不能为空"))
+    elif len(text) < MIN_CONTENT_LEN:
+        issues.append(ValidationIssue("content", f"内容至少需要 {MIN_CONTENT_LEN} 个字符"))
+    if not source_text:
+        issues.append(ValidationIssue("source", "来源不能为空"))
+    if issues:
+        return None, False, issues
+
+    content_hash = _sha256(text)
+    existing = raws.find_by_hash(lead_id, content_hash)
+    if existing is not None:
+        return existing, True, []
+
+    item = RawItem(
+        id=str(uuid.uuid4()),
+        lead_id=lead_id,
+        source=source_text,
+        content=text,
+        content_hash=content_hash,
+        at=clock(),
+    )
+    raws.add(item)
+    return item, False, []
+
+
 @dataclass(frozen=True)
 class ExtractOutcome:
     """一次提炼的结果：成功的候选、被丢弃的原因、这次运行的账、以及自动补上的线索字段。
@@ -86,37 +131,13 @@ class IngestService:
 
         第三个返回值是「是否命中已有内容」：接口要靠它区分 201 与 200，
         但去重判断本身只在这里做一次（路由不重复算哈希）。
+        校验与去重逻辑在 `register_raw_item`，分拣用例用的是同一段。
         """
         if self._leads.get(lead_id) is None:
             return None, False, [ValidationIssue("lead_id", "线索不存在")]
-
-        text = content.strip() if isinstance(content, str) else ""
-        source_text = source.strip() if isinstance(source, str) else ""
-        issues: list[ValidationIssue] = []
-        if not text:
-            issues.append(ValidationIssue("content", "内容不能为空"))
-        elif len(text) < MIN_CONTENT_LEN:
-            issues.append(ValidationIssue("content", f"内容至少需要 {MIN_CONTENT_LEN} 个字符"))
-        if not source_text:
-            issues.append(ValidationIssue("source", "来源不能为空"))
-        if issues:
-            return None, False, issues
-
-        content_hash = _sha256(text)
-        existing = self._raws.find_by_hash(lead_id, content_hash)
-        if existing is not None:
-            return existing, True, []
-
-        item = RawItem(
-            id=str(uuid.uuid4()),
-            lead_id=lead_id,
-            source=source_text,
-            content=text,
-            content_hash=content_hash,
-            at=self._clock(),
+        return register_raw_item(
+            self._raws, lead_id=lead_id, content=content, source=source, clock=self._clock
         )
-        self._raws.add(item)
-        return item, False, []
 
     def list_raws(self, lead_id: str) -> tuple[list[RawItem], list[ValidationIssue]]:
         """该线索的原始素材，按时间正序；线索不存在时返回问题。"""

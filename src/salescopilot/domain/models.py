@@ -198,6 +198,25 @@ class ExtractRun:
 
 
 @dataclass(frozen=True)
+class SortingResult:
+    """一次分拣判断的原样产出：三块建议（要素 / 分级 / 出库）＋ 产出它们的证据。
+
+    - `payload`：已解析的模型返回（`elements` / `grading` / `next_action`），
+      形状对不对由 `domain/sorting.py` 判，适配器不替模型修补；
+    - `raw_text`：模型返回的**原始 JSON 文本**，原样进 `sorting_batches.suggestion_json`
+      ——审计要的是「当时到底吐了什么」，所以不在这里重新序列化；
+    - `model` / `prompt_version` / `token` / `seconds`：写进分拣单与后续复盘的证据（假模型固定 0）。
+    """
+
+    payload: dict
+    raw_text: str
+    model: str
+    prompt_version: str
+    token: int
+    seconds: float
+
+
+@dataclass(frozen=True)
 class DraftResult:
     """一次话术生成的原样产出：正文、用到的资料编号、以及这次生成的成本证据。
 

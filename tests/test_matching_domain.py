@@ -233,6 +233,22 @@ def test_suffix_only_difference_false_when_core_differs() -> None:
     assert suffix_only_difference("华远科技", "华远远科技") is False
 
 
+def test_suffix_only_difference_false_when_only_whitespace_differs() -> None:
+    """只差内部空格不算不同法人：格式归一后整串相同（同一家的两种写法）。"""
+    assert suffix_only_difference("华远科技 有限公司", "华远科技有限公司") is False
+
+
+def test_suffix_only_difference_false_when_only_width_or_case_differs() -> None:
+    """全角/半角括号、大小写也只是写法差异，不构成「不同主体」。"""
+    assert suffix_only_difference("华远科技（集团）", "华远科技(集团)") is False
+    assert suffix_only_difference("ACME Trading 有限公司", "acme trading有限公司") is False
+
+
+def test_suffix_only_difference_true_for_bracket_org_form() -> None:
+    """括号里写组织形式（「（集团）」）与裸名相比仍是不同主体：核心串相同、整串不同。"""
+    assert suffix_only_difference("华远建设（集团）", "华远建设") is True
+
+
 def test_rank_candidates_orders_by_score_then_scorer_and_truncates() -> None:
     """同分按 exact > fuzzy > vector，再按入参顺序；limit 截断生效。"""
     candidates = [

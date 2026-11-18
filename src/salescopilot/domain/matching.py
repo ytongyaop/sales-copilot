@@ -102,10 +102,20 @@ def normalize_org(name: str, *, suffixes: tuple[str, ...] = ORG_SUFFIXES) -> str
     return _strip_brackets(text).lower()
 
 
+def format_key(name: str) -> str:
+    """格式归一：全角转半角 → 去全部空白（含内部）→ 统一括号（NFKC 已把全角括号转半角）
+    → 小写。
+
+    只抹平「写法差异」，不抹平「叫法差异」：去后缀、去括号内容这些属于语义归一，
+    留给 `normalize_org`；这里的输出专门用来判断「是不是同一个全称的不同写法」。
+    """
+    return _squeeze(name).lower()
+
+
 def suffix_only_difference(
     raw_a: str, raw_b: str, *, suffixes: tuple[str, ...] = ORG_SUFFIXES
 ) -> bool:
-    """两个全称是否**只**在组织形式后缀上不同（核心串相同、原串不同）。
+    """两个全称是否**只**在组织形式后缀上不同（核心串相同、整串不同）。
 
     「华远科技有限公司」与「华远科技集团」核心串都是「华远科技」，但前者是有限公司、
     后者是集团，法律上是两个主体，不能自动合并，只能进复核。
@@ -114,15 +124,20 @@ def suffix_only_difference(
     与「华远建设（上海）」规范化后同为「华远建设」、字符串 100 分，会被自动合并成一家，
     而它们其实是在两地注册的两个主体。
 
-    判据要求原串（仅去首尾空白后）确实不同：完全同名、或只差首尾空白时返回 `False`，
-    由调用方按常规流程判（同名自然走精确键）。核心串为空（名称本身只有后缀）时也返回
-    `False`，避免把两个空壳判成「仅组织形式不同」。
+    判据分两步，顺序不能换：
+    1. 核心串相同（去后缀、去括号内容后相等）——不同就不是「仅组织形式不同」；
+    2. **格式归一后**的整串仍不同（见 `format_key`：全角/半角、内部空白、大小写、
+       括号写法都抹平）。所以「华远科技 有限公司」与「华远科技有限公司」只差一个
+       空格，返回 `False`——那是同一家的两种写法，不是两个法人。
+
+    核心串为空（名称本身只有后缀）时也返回 `False`，避免把两个空壳判成「仅组织形式
+    不同」。
     """
     core_a = _strip_brackets(_strip_org_suffix(_squeeze(raw_a), suffixes)).lower()
     core_b = _strip_brackets(_strip_org_suffix(_squeeze(raw_b), suffixes)).lower()
     if not core_a or not core_b or core_a != core_b:
         return False
-    return _as_text(raw_a).strip() != _as_text(raw_b).strip()
+    return format_key(raw_a) != format_key(raw_b)
 
 
 def normalize_person(name: str) -> str:

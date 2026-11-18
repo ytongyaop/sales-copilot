@@ -16,15 +16,16 @@ from salescopilot.adapters.db.sqlite import (
     SqliteFollowupRepository,
     SqliteLeadRepository,
     SqliteRawItemRepository,
+    SqliteSortingBatchRepository,
     SqliteStageEventRepository,
     default_db_path,
 )
 from salescopilot.adapters.knowledge.chroma_store import ChromaStore
 from salescopilot.adapters.knowledge.embedding import DashScopeEmbedder, FakeEmbedder
 from salescopilot.adapters.knowledge.manifest import manifest_path_of
-from salescopilot.adapters.llm.deepseek import DeepSeekExtractor
+from salescopilot.adapters.llm.deepseek import DeepSeekExtractor, DeepSeekSorting
 from salescopilot.adapters.llm.draft import DeepSeekDrafter, FakeDrafter
-from salescopilot.adapters.llm.fake import FakeExtractor
+from salescopilot.adapters.llm.fake import FakeExtractor, FakeSorting
 from salescopilot.adapters.template.loader import TemplateError, load_all
 from salescopilot.config import (
     ConfigError,
@@ -44,6 +45,8 @@ from salescopilot.domain.ports import (
     FollowupRepository,
     LeadRepository,
     RawItemRepository,
+    SortingBatchRepository,
+    SortingJudge,
     StageEventRepository,
     VectorStore,
 )
@@ -58,6 +61,7 @@ from salescopilot.services.ingest import IngestService
 from salescopilot.services.knowledge import KnowledgeService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
+from salescopilot.services.sorting import SortingService
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
@@ -251,6 +255,27 @@ def build_draft_service(live: bool | None = None) -> DraftService:
         drafts,
         followups=followups,
     )
+
+
+def build_sorting_judge(live: bool | None = None) -> SortingJudge:
+    """分拣模型：默认假实现；`live=True` 缺 key 直接抛 `ConfigError`，不静默退回。"""
+    if not _resolve_live(live):
+        return FakeSorting()
+    settings: Settings = load_settings()
+    return DeepSeekSorting(api_key=require_chat_key(settings), model=settings.chat_model)
+
+
+def build_sorting_service(live: bool | None = None) -> SortingService:
+    """投料与分拣用例：线索 + 原文 + 分拣单三条仓储 + 分拣模型。
+
+    向量本增量不装（`vector_score=None`）：归属只走精确键与字符串两级，
+    灰区一律进待认领池。
+    """
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    raws: RawItemRepository = SqliteRawItemRepository(db)
+    batches: SortingBatchRepository = SqliteSortingBatchRepository(db)
+    return SortingService(leads, raws, batches, build_sorting_judge(live))
 
 
 def _resolve_live(live: bool | None) -> bool:

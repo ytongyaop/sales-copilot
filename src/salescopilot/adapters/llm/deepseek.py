@@ -19,8 +19,14 @@ from salescopilot.adapters.llm.prompts import (
     SYSTEM_PROMPT,
     build_user_prompt,
 )
-from salescopilot.domain.errors import ExtractError
-from salescopilot.domain.models import ExtractionResult, Fact, RawItem
+from salescopilot.adapters.llm.prompts_sorting import (
+    SORTING_PROMPT_VERSION,
+    SORTING_SYSTEM_PROMPT,
+    build_sorting_user_prompt,
+)
+from salescopilot.domain.errors import ExtractError, SortingError
+from salescopilot.domain.matching import Candidate
+from salescopilot.domain.models import ExtractionResult, Fact, RawItem, SortingResult
 
 BASE_URL = "https://api.deepseek.com"
 
@@ -133,3 +139,75 @@ def _describe(exc: Exception) -> str:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class DeepSeekSorting:
+    """真模型分拣器：一次调用拿到要素 / 分级 / 出库三块，返回原样 JSON 与本次耗用。
+
+    与提炼器共用同一套约定：`json_object` 模式、温度 0、按 `max_retries` 重试，
+    失败抛 `SortingError`；不在这里修补模型输出（形状与出处由 `domain/sorting.py` 判）。
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "deepseek-chat",
+        prompt_version: str = SORTING_PROMPT_VERSION,
+        timeout: float = 30.0,
+        max_retries: int = 2,
+    ) -> None:
+        self._client = OpenAI(api_key=api_key, base_url=BASE_URL, timeout=timeout)
+        self._model = model
+        self._prompt_version = prompt_version
+        self._max_retries = max(0, int(max_retries))
+
+    def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult:
+        """对一段原文跑一次分拣；返回三块建议与本次耗用，失败抛 `SortingError`。"""
+        messages = [
+            {"role": "system", "content": SORTING_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_sorting_user_prompt(content=content, candidates=list(candidates)),
+            },
+        ]
+
+        started = time.perf_counter()
+        attempts = 0
+        reason = "未知原因"
+
+        for attempt in range(self._max_retries + 1):
+            attempts = attempt + 1
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                text = _message_text(response)
+                payload = _parse_sorting(text)
+            except Exception as exc:  # noqa: BLE001 - 网络与解析失败都走同一条重试路径
+                reason = _describe(exc)
+                continue
+            return SortingResult(
+                payload=payload,
+                raw_text=text,
+                model=self._model,
+                prompt_version=self._prompt_version,
+                token=_total_tokens(response),
+                seconds=time.perf_counter() - started,
+            )
+
+        raise SortingError(f"分拣失败：{reason}（已尝试 {attempts} 次）")
+
+
+def _parse_sorting(text: str) -> dict:
+    """把返回文本解析成分拣建议；不是 JSON 对象就是失败（触发重试），不猜、不修补。"""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"返回不是合法 JSON（{exc.msg}）") from exc
+    if not isinstance(data, dict):
+        raise TypeError("返回不是 JSON 对象")
+    return data

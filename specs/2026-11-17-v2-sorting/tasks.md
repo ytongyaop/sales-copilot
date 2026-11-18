@@ -30,10 +30,10 @@
   - 验收命令：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --model funnel`；`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --json %TEMP%\cal2.json`；`.\.venv\Scripts\python.exe -m pytest -q` 全绿
   - 预估：2h　依赖：T002b
 
-- [ ] **[T003] 一次投料 → 分拣单（fake LLM + 出处对齐校验）**
-  - 目标：`POST /sorting` 一次投料产出含归属 / 要素 / 分级 / 出库四块的分拣单，每块带能在原文定位到的 `source_span`；归属只在 `band='review'` 且候选 ≤3 时调 LLM 复核（其余档位不调，可断言调用次数）；`source_span` 落库前过 `domain/span_align.py`，对不上的字段丢弃并记 `span_misaligned` 诊断。
-  - 涉及文件：`src/salescopilot/adapters/llm/prompts_sorting.py`（新建）、`src/salescopilot/domain/span_align.py`（新建）、`src/salescopilot/adapters/llm/fake.py`、`src/salescopilot/adapters/llm/deepseek.py`、`src/salescopilot/domain/ports.py`、`src/salescopilot/services/sorting.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_sorting_service.py`（新建）、`tests/test_sorting_api.py`（新建）、`tests/test_span_align.py`（新建）
-  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_service.py tests\test_sorting_api.py tests\test_span_align.py`；`/docs` 里发一次 `POST /sorting` 看到四块 JSON 且 `source_span` 能在原文定位
+- [x] **[T003] 一次投料 → 分拣单（fake LLM + 出处对齐校验）**
+  - 目标：`POST /sorting` 一次投料产出含归属 / 要素 / 分级 / 出库四块的分拣单，每块带能在原文定位到的 `source_span`；归属走 L0 精确键 → L1 字符串 → L2（本增量 `vector_score=None`，只留参数），只有精确键命中才 `auto`，灰区与新客户进待认领池；要素的 `source_span` 落库前过 `domain/sorting.py` 的 `align_span`，对不上就丢弃该条并记 `dropped`；灰区才把候选（≤3）交给模型参考，可用计数断言。
+  - 涉及文件：`src/salescopilot/domain/sorting.py`（新建）、`src/salescopilot/adapters/llm/prompts_sorting.py`（新建）、`src/salescopilot/adapters/llm/fake.py`、`src/salescopilot/adapters/llm/deepseek.py`、`src/salescopilot/domain/ports.py`、`src/salescopilot/domain/models.py`、`src/salescopilot/domain/errors.py`、`src/salescopilot/services/sorting.py`（新建）、`src/salescopilot/services/ingest.py`（抽出 `register_raw_item` 供两处共用幂等登记）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_span_align.py`（新建）、`tests/test_sorting_domain.py`（新建）、`tests/test_sorting_service.py`（新建）、`tests/test_sorting_api.py`（新建）
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_span_align.py tests\test_sorting_domain.py tests\test_sorting_service.py tests\test_sorting_api.py`；`/docs` 里发一次 `POST /sorting` 看到四块 JSON 且 `source_span` 能在原文定位
   - 预估：9h　依赖：T002、T002b
 
 - [ ] **[T004] 分拣确认与待认领池**
@@ -86,8 +86,8 @@
 
 ## 汇总
 
-- 增量数：**11**（阶段 A 5 个：T001 / T002 / T002b / T003 / T004；B 2 个；C 2 个；D 2 个）
-- 总预估：**73 小时**（6 + 9 + 3 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 6；T002 取 8–10h 的中值 9h），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
+- 增量数：**12**（阶段 A 6 个：T001 / T002 / T002b / T002c / T003 / T004；B 2 个；C 2 个；D 2 个）
+- 总预估：**77 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 6；分项相加 76h，按主管口径记 77h），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
 - 依赖关系：**T002 → T002b → T003**（阈值先校准、再让分拣链路用上校准值，避免拿拍脑袋的阈值去跑真实投料）；其余依赖不变：T001 → T002 / T005，T003 → T004，T004 + T005 + T006 + T008 → T009，T009 → T010。
 - 排序原则：先数据层与迁移（T001，保证后面每一步都有地方落）→ 再按"分拣（含阈值校准）→ 卡片 → 分级 → 出库"的数据依赖推进 → 前端最后接（后端接口定型后再画页面）→ 最后换场并做全量验收。不勾完上一阶段不进下一阶段。
 - 并行机会：T002 与 T005 互不依赖，可并行；T002b 的 50 对标注样本可以提前单独标（纯人工，不占开发工时）；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次。

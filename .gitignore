@@ -19,6 +19,9 @@ data/*
 !data/knowledge/
 !data/seed/
 !data/evalsets/
+!data/reports/
+# 报告只留人读的 .md：脚本跑出来的原始 JSON 是本地中间产物，不入库
+data/reports/*.json
 data/index/
 data/backup/
 *.sqlite3
