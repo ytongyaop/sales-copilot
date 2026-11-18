@@ -109,6 +109,10 @@ MIN_LEAD_NAME_LEN = 2
 # 模板里 label 带这些字的就是时间类字段：取值必须是 ISO 日期，不许留「下周三」。
 TIME_FIELD_LABELS: tuple[str, ...] = ("时间", "日期")
 
+# 分拣单上的分级只有这一个来源：规则（`domain/grading.py`）。模型那份另行标注 `model_grading`，
+# 前端据此一眼看出「给人看的档」与「模型自报的档」不是同一件事（见 ADR-0008）。
+GRADING_SOURCE_RULE = "rule"
+
 
 @dataclass(frozen=True)
 class SortingOutcome:
@@ -120,7 +124,9 @@ class SortingOutcome:
       与 `batch.suggestion_json`（模型原文）刻意不同：一个给人看，一个给审计看；
     - `dropped` 每项形如 `{"index", "reason"}`，`index` 是模型输出里的下标；
     - `lead_candidates` 是这次落库的归属候选（`batch.candidates_json` 的同一份内容，
-      已是 `{"lead_id", "name", "score", "scorer"}` 字典）；路由直接回给前端，不用再解析 JSON。
+      已是 `{"lead_id", "name", "score", "scorer"}` 字典）；路由直接回给前端，不用再解析 JSON；
+    - `model_grading` 是模型原文里那份 `grading`（只做形状兜底，内容一字不改）：
+      给人看的档位在 `suggestion.grading`，这一份只用于对比与审计。
     """
 
     batch: SortingBatch | None
@@ -128,6 +134,7 @@ class SortingOutcome:
     suggestion: SortingSuggestion | None = None
     dropped: list[dict] = field(default_factory=list)
     lead_candidates: list[dict] = field(default_factory=list)
+    model_grading: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -346,7 +353,9 @@ class SortingService:
             grading=grading,
             next_action=next_action,
         )
-        return SortingOutcome(batch, [], suggestion, dropped, candidate_payload)
+        return SortingOutcome(
+            batch, [], suggestion, dropped, candidate_payload, _model_grading(result.payload)
+        )
 
     # -------------------------------------------------------------- 归属漏斗
 
@@ -632,22 +641,7 @@ class SortingService:
         if raw is None:
             return 0, [], [ValidationIssue("raw_id", "原文不存在，无法复核出处")]
 
-        payload = _loads(batch.suggestion_json) or {}
-        raw_elements = payload.get("elements")
-        kept_raw, bad_dates, index_map = _split_bad_dates(raw_elements, self._time_fields(lead_id))
-        elements, diagnostics = validate_elements(raw.content, kept_raw)
-        skipped: list[dict] = [
-            {"field": _element_field(raw_elements, entry["index"]), "reason": entry["reason"]}
-            for entry in bad_dates
-        ]
-        for message in diagnostics:
-            index, reason = split_diagnostic(message)
-            skipped.append(
-                {
-                    "field": _element_field(raw_elements, _original_index(index, index_map)),
-                    "reason": reason,
-                }
-            )
+        elements, skipped = self._validated_elements(batch, lead_id)
 
         now = self._clock()
         allowed = self._allowed_fields(lead_id)
@@ -680,6 +674,36 @@ class SortingService:
             applied += 1
 
         return applied, skipped, []
+
+    def _validated_elements(
+        self, batch: SortingBatch, lead_id: str | None
+    ) -> tuple[list[ElementHit], list[dict]]:
+        """从 `suggestion_json`（模型原文）重新校验要素：返回（过关的要素, 跳过明细）。
+
+        同一个校验只写一遍，两个地方共用：落事实前复核出处（`_apply_elements`）、
+        单条查询时按规则算分级（`get_batch`）——单条视图里的等级与投料时那一份
+        因此来自同一批要素，不会出现「投料说 needs_info、详情说 A」。
+        """
+        raw = self._raws.get(batch.raw_id)
+        if raw is None:
+            return [], []
+        payload = _loads(batch.suggestion_json) or {}
+        raw_elements = payload.get("elements")
+        kept_raw, bad_dates, index_map = _split_bad_dates(raw_elements, self._time_fields(lead_id))
+        elements, diagnostics = validate_elements(raw.content, kept_raw)
+        skipped: list[dict] = [
+            {"field": _element_field(raw_elements, entry["index"]), "reason": entry["reason"]}
+            for entry in bad_dates
+        ]
+        for message in diagnostics:
+            index, reason = split_diagnostic(message)
+            skipped.append(
+                {
+                    "field": _element_field(raw_elements, _original_index(index, index_map)),
+                    "reason": reason,
+                }
+            )
+        return elements, skipped
 
     def _allowed_fields(self, lead_id: str) -> tuple[str, ...]:
         """该客户的事实字段白名单：旧默认 ∪ 它自己的模板声明的信息卡字段。
@@ -794,7 +818,12 @@ class SortingService:
 
     def get_batch(self, batch_id: str) -> tuple[dict | None, list[ValidationIssue]]:
         """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）、
-        投料原文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。"""
+        投料原文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。
+
+        `suggestion.grading` **按规则现算**（与 `POST /sorting`、客户详情页同一个函数），
+        不是模型自报的那份；模型给的那份原样放 `suggestion.model_grading` 供对比，
+        `suggestion_json` 本身一个字都不改（审计要「模型当时到底说了什么」）。
+        """
         batch = self._batches.get(batch_id)
         if batch is None:
             return None, [ValidationIssue("batch_id", "分拣单不存在")]
@@ -807,12 +836,32 @@ class SortingService:
                 "raw_id": batch.raw_id,
                 "content": raw.content if raw is not None else "",
                 "suggestion_json": batch.suggestion_json,
-                "suggestion": _loads(batch.suggestion_json),
+                "suggestion": self._suggestion_view(batch),
                 "lead_candidates": _loads_items(batch.candidates_json),
                 "dropped": _loads_items(batch.dropped_json),
             }
         )
         return body, []
+
+    def _suggestion_view(self, batch: SortingBatch) -> dict:
+        """单条视图里的 `suggestion`：键与 `POST /sorting` 完全对齐（同一套词，前端只认一遍）。
+
+        - `elements` / `next_action`：模型原文里的那两份（本增量不改这两块的口径）；
+        - `grading`：按规则现算，与投料时同一份要素、同一个函数；
+        - `grading_source`：恒为 `rule`，标明这张单的档位来源；
+        - `model_grading`：模型原文里那份，形状不对就是 null（不编一份假的）。
+        """
+        payload = _loads(batch.suggestion_json) or {}
+        elements, _skipped = self._validated_elements(batch, batch.lead_id)
+        raw_elements = payload.get("elements")
+        raw_next = payload.get("next_action")
+        return {
+            "elements": raw_elements if isinstance(raw_elements, list) else [],
+            "grading": self._grade(elements, batch.lead_id),
+            "grading_source": GRADING_SOURCE_RULE,
+            "model_grading": _model_grading(payload),
+            "next_action": raw_next if isinstance(raw_next, dict) else {},
+        }
 
 
 def _summary(batch: SortingBatch, lead_name: str | None) -> dict:
@@ -930,6 +979,15 @@ def _facts_from_elements(elements: list[ElementHit], lead_id: str) -> list[Fact]
         )
         for index, element in enumerate(elements)
     ]
+
+
+def _model_grading(payload: dict | None) -> dict | None:
+    """模型原文里那份 `grading`：只做形状兜底，内容一字不改（审计与对比都要原样）。
+
+    给人看的档位一律由 `grade_from_facts` 算出（ADR-0008），这一份只标注「模型当时自报了什么」。
+    """
+    grading = payload.get("grading") if isinstance(payload, dict) else None
+    return grading if isinstance(grading, dict) else None
 
 
 def _loads(text: str) -> dict | None:

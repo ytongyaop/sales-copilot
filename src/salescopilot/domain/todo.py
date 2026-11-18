@@ -230,9 +230,15 @@ def _reason(
 
 
 def _due_phrase(due_kind: str, due_date: date | None, today: date) -> str:
-    """到期程度的人话：昨天 / 今天 / N 天后 / 还没约定。"""
-    if due_kind == "none" or due_date is None:
+    """到期程度的人话：昨天 / 今天 / N 天后 / 还没约定。
+
+    `due_kind == "none"` 有两种来路：真没约（`due_date is None`）与「约了但还在窗口外」。
+    后者必须说「下次约定在 N 天后」——人家明明约了，说「还没约定」就是栽赃。
+    """
+    if due_date is None:
         return "还没约定下次时间"
+    if due_kind == "none":
+        return f"下次约定在 {(due_date - today).days} 天后"
     if due_kind == "overdue":
         days = (today - due_date).days
         return "约定昨天已过" if days == 1 else f"约定 {days} 天前已过"

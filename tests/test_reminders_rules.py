@@ -103,6 +103,36 @@ def test_feedback_window_hours_participates_in_decision() -> None:
     assert _remind([lead], [followup], _template(feedback_window_hours=48)) == []
 
 
+def test_feedback_window_says_hours_when_within_one_day() -> None:
+    """约定就是今天、只过了几个小时 → 按小时说，不再出现「已过 0 天」。"""
+    lead = _lead(stage="qualify", created_at="2026-11-16T00:00:00+00:00")
+    # 约定今天 00:00，窗口 0 小时 → 截止 00:00；now 12:00 → 已过 12 小时
+    followup = _followup(at="2026-11-16T08:00:00+00:00", next_followup_at="2026-11-16")
+
+    reminders = _remind([lead], [followup], _template(feedback_window_hours=0))
+
+    assert [item.kind for item in reminders] == [FEEDBACK_WINDOW]
+    assert reminders[0].message == "约定时间已过 12 小时未更新"
+    assert "0 天" not in reminders[0].message
+
+
+def test_feedback_window_never_says_zero_hours() -> None:
+    """刚过窗口（不满 1 小时）也记 1 小时：已经判了超时，说「0 小时」等于没说。"""
+    lead = _lead(stage="qualify", created_at="2026-11-16T00:00:00+00:00")
+    followup = _followup(at="2026-11-16T00:00:00+00:00", next_followup_at="2026-11-16")
+    just_after_midnight = datetime(2026, 11, 16, 0, 20, tzinfo=UTC)
+
+    reminders = compute_reminders(
+        leads=[lead],
+        followups=[followup],
+        template=_template(feedback_window_hours=0),
+        now=just_after_midnight,
+    )
+
+    assert [item.kind for item in reminders] == [FEEDBACK_WINDOW]
+    assert reminders[0].message == "约定时间已过 1 小时未更新"
+
+
 def test_missing_next_followup_at_turns_gray() -> None:
     """最近一次跟进没填下次跟进时间 → 灰灯「没有下次跟进时间」。"""
     reminders = _remind(

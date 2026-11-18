@@ -37,7 +37,8 @@ const MODE_LABELS = {
 
 const settings = ref(null)
 const error = ref('')
-const loading = ref(false)
+// 是否已经拿到过第一次结果：没有它，首帧会先说「模板清单为空 / 模式未知」。
+const loaded = ref(false)
 
 // CSV 导入（T009b 从货架页搬过来）：原文交给后端解析与去重，前端不做第二套规则。
 const importing = ref(false)
@@ -57,7 +58,6 @@ const models = computed(() => {
 const templates = computed(() => (settings.value ? settings.value.templates : []))
 
 async function load() {
-  loading.value = true
   error.value = ''
   try {
     settings.value = await retryOnce(getSettings)
@@ -65,7 +65,8 @@ async function load() {
     settings.value = null
     error.value = err.message
   } finally {
-    loading.value = false
+    // 失败也算「问过了」：这时页面显示错误条，不该再补一句「模板清单为空」。
+    loaded.value = true
   }
 }
 
@@ -145,7 +146,7 @@ onMounted(load)
     <h2 class="page-title">设置</h2>
 
     <p v-if="error" class="error">{{ error }}</p>
-    <p v-if="loading && !settings" class="hint">加载中…</p>
+    <p v-if="!loaded" class="hint">加载中…</p>
 
     <section class="card">
       <h2>运行模式</h2>
@@ -153,7 +154,7 @@ onMounted(load)
         <span v-if="mode" class="mode" :class="mode === 'live' ? 'live' : 'fake'">
           {{ mode === 'live' ? '模式：真模型' : '模式：假模型（演示数据不可信）' }}
         </span>
-        <span v-else class="muted">模式未知（后端未连接）</span>
+        <span v-else-if="loaded" class="muted">模式未知（后端未连接）</span>
       </p>
       <p v-if="models" class="muted">
         对话模型：{{ models.chat }}　向量模型：{{ models.embed }}
@@ -231,7 +232,9 @@ onMounted(load)
         </div>
       </div>
 
-      <p v-if="templates.length === 0" class="hint">模板清单为空（后端未连接或模板目录为空）。</p>
+      <p v-if="loaded && templates.length === 0" class="hint">
+        模板清单为空（后端未连接或模板目录为空）。
+      </p>
     </section>
 
     <section class="card">

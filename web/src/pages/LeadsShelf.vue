@@ -44,7 +44,8 @@ const reminders = ref([])
 
 const keyword = ref('')
 const scope = ref('all') // all | pool
-const loading = ref(false)
+// 是否已经拿到过第一次结果：没有它，首帧会把「还没加载」画成「还没有客户」。
+const loaded = ref(false)
 const error = ref('')
 
 // 线索管理（新增 / 认领 / 释放）：都是 v1 就有的入口，折叠到页面下方。
@@ -109,7 +110,6 @@ function stageLabel(lead) {
 }
 
 async function load() {
-  loading.value = true
   error.value = ''
   try {
     // 首屏那一次请求最容易撞上后端还没就绪：整批失败自动重试一次（见 `api.js`）。
@@ -124,7 +124,8 @@ async function load() {
   } catch (err) {
     error.value = err.message
   } finally {
-    loading.value = false
+    // 成功、失败都算「这次已经问过了」：失败时页面显示错误条，不该再说「还没有客户」。
+    loaded.value = true
   }
 }
 
@@ -273,51 +274,54 @@ onMounted(async () => {
         </div>
       </div>
 
-      <p v-if="loading" class="hint">加载中…</p>
+      <!-- 顺序固定：没加载完 → 真空 → 筛掉了 → 分组。首帧不许先说「还没有客户」。 -->
+      <p v-if="!loaded" class="hint">加载中…</p>
       <p v-else-if="shelf.length === 0" class="hint">
         还没有客户：在页面下方「线索管理」里新增一条，或到分拣台投一段料。
       </p>
       <p v-else-if="visibleCards.length === 0" class="hint">当前筛选下没有客户。</p>
 
-      <div v-for="group in grouped" :key="group.key" class="group">
-        <h3 class="group-title">
-          {{ group.label }} <span class="muted">{{ group.items.length }}</span>
-        </h3>
-        <p v-if="group.items.length === 0" class="hint">这一组还没有客户。</p>
-        <div v-else class="lead-grid">
-          <article
-            v-for="card in group.items"
-            :key="card.lead_id"
-            class="lead-card"
-            title="打开客户详情"
-            @click="openCard(card)"
-          >
-            <!-- 风险色点：颜色来自后端 `reminder_level`，hover 的提示语来自 `GET /reminders` 的那条 message。 -->
-            <span
-              v-if="card.reminder_level"
-              class="risk-dot"
-              :class="card.reminder_level"
-              :title="reminderTitle(card)"
-            ></span>
-            <div class="lead-card-head">
-              <strong>{{ card.name }}</strong>
-              <span class="grade-badge" :class="gradeClass(card.grade)">
-                {{ gradeBadge(card.grade) }}
-              </span>
-            </div>
-            <p class="muted owner">{{ card.owner || '未分配（公海）' }}</p>
-            <div class="bar" :title="`信息卡覆盖 ${card.filled}/${card.total}`">
-              <span class="bar-fill" :style="{ width: formatPercent(card.coverage) }"></span>
-            </div>
-            <p class="meta">
-              覆盖 {{ formatPercent(card.coverage) }}（{{ card.filled }}/{{ card.total }}）· 缺
-              {{ card.missing_count }} 项
-            </p>
-            <p v-if="card.next_appointment" class="meta">下次约定 {{ card.next_appointment }}</p>
-            <p v-else class="meta muted">还没约定下次</p>
-          </article>
+      <template v-if="loaded">
+        <div v-for="group in grouped" :key="group.key" class="group">
+          <h3 class="group-title">
+            {{ group.label }} <span class="muted">{{ group.items.length }}</span>
+          </h3>
+          <p v-if="group.items.length === 0" class="hint">这一组还没有客户。</p>
+          <div v-else class="lead-grid">
+            <article
+              v-for="card in group.items"
+              :key="card.lead_id"
+              class="lead-card"
+              title="打开客户详情"
+              @click="openCard(card)"
+            >
+              <!-- 风险色点：颜色来自后端 `reminder_level`，hover 的提示语来自 `GET /reminders` 的那条 message。 -->
+              <span
+                v-if="card.reminder_level"
+                class="risk-dot"
+                :class="card.reminder_level"
+                :title="reminderTitle(card)"
+              ></span>
+              <div class="lead-card-head">
+                <strong>{{ card.name }}</strong>
+                <span class="grade-badge" :class="gradeClass(card.grade)">
+                  {{ gradeBadge(card.grade) }}
+                </span>
+              </div>
+              <p class="muted owner">{{ card.owner || '未分配（公海）' }}</p>
+              <div class="bar" :title="`信息卡覆盖 ${card.filled}/${card.total}`">
+                <span class="bar-fill" :style="{ width: formatPercent(card.coverage) }"></span>
+              </div>
+              <p class="meta">
+                覆盖 {{ formatPercent(card.coverage) }}（{{ card.filled }}/{{ card.total }}）· 缺
+                {{ card.missing_count }} 项
+              </p>
+              <p v-if="card.next_appointment" class="meta">下次约定 {{ card.next_appointment }}</p>
+              <p v-else class="meta muted">还没约定下次</p>
+            </article>
+          </div>
         </div>
-      </div>
+      </template>
     </section>
 
     <details class="card manage">
@@ -360,7 +364,8 @@ onMounted(async () => {
       </form>
 
       <h3>归属（认领 / 释放）</h3>
-      <p v-if="leads.length === 0" class="hint">还没有客户。</p>
+      <p v-if="!loaded" class="hint">加载中…</p>
+      <p v-else-if="leads.length === 0" class="hint">还没有客户。</p>
       <table v-else>
         <thead>
           <tr>

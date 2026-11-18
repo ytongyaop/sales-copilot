@@ -57,6 +57,8 @@ const leads = ref([])
 const todo = ref([])
 const todoError = ref('')
 const todoLoading = ref(false)
+// 是否已经拿到过第一次结果：没有它，首帧会把「还没加载」画成「今天没有必须跟的客户」。
+const todoLoaded = ref(false)
 
 // 投料区
 const content = ref('')
@@ -76,6 +78,8 @@ const rejectReason = ref('')
 // 待认领池与最近分拣单：每次处置完只重新拉这两个列表。
 const pool = ref([])
 const recent = ref([])
+// 同理：列表没拿到之前不能报「池子空了 / 还没有分拣单」。
+const listsLoaded = ref(false)
 const panel = ref({ id: '', mode: '' })
 const reviewInfo = ref({})
 const claimPick = ref({})
@@ -159,6 +163,7 @@ async function loadTodo() {
     todoError.value = err.message
   } finally {
     todoLoading.value = false
+    todoLoaded.value = true
   }
 }
 
@@ -171,6 +176,8 @@ async function loadLists() {
     recent.value = allItems.slice(0, 10)
   } catch (err) {
     error.value = err.message
+  } finally {
+    listsLoaded.value = true
   }
 }
 
@@ -398,7 +405,7 @@ watch(
 
     <section class="card">
       <div class="card-head-line">
-        <h2>今日待办 <span class="muted">（{{ todo.length }} 家）</span></h2>
+        <h2>今日待办 <span class="muted">（{{ todoLoaded ? todo.length : '…' }} 家）</span></h2>
         <button
           type="button"
           class="ghost small"
@@ -409,8 +416,9 @@ watch(
           {{ todoLoading ? '刷新中…' : '刷新' }}
         </button>
       </div>
+      <!-- 顺序固定：错误 → 没加载完 → 空 → 列表。少了中间那档，首帧就会撒谎说「今天没有必须跟的客户」。 -->
       <p v-if="todoError" class="error">{{ todoError }}</p>
-      <p v-else-if="todoLoading && todo.length === 0" class="hint">加载中…</p>
+      <p v-else-if="!todoLoaded" class="hint">加载中…</p>
       <p v-else-if="todo.length === 0" class="hint">今天没有必须跟的客户</p>
       <ul v-else class="todo">
         <li
@@ -600,8 +608,9 @@ watch(
     </section>
 
     <section class="card">
-      <h2>待认领池 <span class="muted">（{{ pool.length }} 条）</span></h2>
-      <p v-if="pool.length === 0" class="hint">待认领池是空的。</p>
+      <h2>待认领池 <span class="muted">（{{ listsLoaded ? pool.length : '…' }} 条）</span></h2>
+      <p v-if="!listsLoaded" class="hint">加载中…</p>
+      <p v-else-if="pool.length === 0" class="hint">待认领池是空的。</p>
       <ul v-else class="pool">
         <li v-for="item in pool" :key="item.id">
           <div class="pool-head">
@@ -678,7 +687,8 @@ watch(
 
     <section class="card">
       <h2>最近分拣单</h2>
-      <table v-if="recent.length">
+      <p v-if="!listsLoaded" class="hint">加载中…</p>
+      <table v-else-if="recent.length">
         <thead>
           <tr>
             <th>时间</th>

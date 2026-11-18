@@ -18,6 +18,14 @@ FIRST_RESPONSE = "first_response"
 FEEDBACK_WINDOW = "feedback_window"
 STALE_FOLLOWUP = "stale_followup"
 
+# 小时换算：文案在「不足一天」时按小时说，够了才按天说——不再出现「已过 0 天」。
+HOURS_PER_DAY = 24
+SECONDS_PER_HOUR = 3600
+
+# 反馈窗口超时的文案模板：`N` 由 `_overdue_message` 填，单位二选一。
+FEEDBACK_OVERDUE_HOURS = "约定时间已过 {n} 小时未更新"
+FEEDBACK_OVERDUE_DAYS = "约定时间已过 {n} 天未更新"
+
 # 严重度：数字越大越严重；排序与「取最严重」都只认这张表。
 SEVERITY: dict[str, int] = {"red": 3, "yellow": 2, "gray": 1}
 
@@ -143,13 +151,12 @@ def _candidates(
         elif feedback_hours is not None:
             deadline = datetime.combine(agreed, time.min, UTC) + timedelta(hours=feedback_hours)
             if now > deadline:
-                days = (now.date() - agreed).days
                 out.append(
                     Reminder(
                         lead.id,
                         FEEDBACK_WINDOW,
                         "yellow",
-                        f"约定时间已过 {days} 天未更新",
+                        _overdue_message(agreed, now),
                         _minutes_since(deadline, now),
                     )
                 )
@@ -169,6 +176,20 @@ def _candidates(
             )
 
     return out
+
+
+def _overdue_message(agreed: date, now: datetime) -> str:
+    """反馈窗口超时的人话：不足 1 天按小时说，够 1 天才按天说。
+
+    起点是**约定时间当天 00:00**（不含 `feedback_window_hours`）：那句话说的是
+    「约定时间已过多久」，窗口只是「什么时候开始算超时」。不足一小时记 1 小时，
+    不写「已过 0 小时」——已经判了超时，说 0 只会让人以为算错了。
+    """
+    elapsed = now - datetime.combine(agreed, time.min, UTC)
+    hours = max(1, int(elapsed.total_seconds() // SECONDS_PER_HOUR))
+    if hours < HOURS_PER_DAY:
+        return FEEDBACK_OVERDUE_HOURS.format(n=hours)
+    return FEEDBACK_OVERDUE_DAYS.format(n=hours // HOURS_PER_DAY)
 
 
 def _most_severe(reminders: list[Reminder]) -> Reminder | None:

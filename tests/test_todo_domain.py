@@ -318,6 +318,24 @@ def test_week_window_comes_from_template_only() -> None:
     assert without_window[0].due_kind == "none"
 
 
+def test_due_phrase_says_when_the_far_appointment_is() -> None:
+    """约了但还在窗口外：说「下次约定在 N 天后」，不是「还没约定下次时间」。"""
+    items = build_todo(
+        leads=[_lead("a"), _lead("b")],
+        facts=[],
+        followups=[_followup("a", due="2026-11-28")],
+        grading={"a": "B", "b": "B"},
+        template=_spec(week_days=7),
+        today=TODAY,
+    )
+
+    reasons = {item.lead_id: item.reason for item in items}
+    assert "下次约定在 10 天后" in reasons["a"]
+    assert "还没约定下次时间" not in reasons["a"]
+    # 真没约的那条仍说「还没约定下次时间」：两种「none」不能混成一句。
+    assert "还没约定下次时间" in reasons["b"]
+
+
 def test_max_items_truncates_from_the_template() -> None:
     """条目上限来自模板 `max_items`：留最靠前的几条，不是前几个碰巧排到的。"""
     leads = [_lead("a"), _lead("b"), _lead("c")]

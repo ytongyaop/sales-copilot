@@ -4,6 +4,7 @@
 坏参数 422。路由只调用例，判据都在 `domain/sorting.py`，这里只验「接线对不对」。
 """
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from salescopilot.entrypoints.api.app import app
 LEAD = {"name": "华远建设有限公司", "contact": "13800001111", "source": "referral"}
 PHONE_CONTENT = "13800001111 那边说预算三十万，下周一下午再聊"
 NEW_CONTENT = "完全不相干的一通闲聊，预算还在谈，下周再说"
+# 只有「需求」一条要素：模型按覆盖度会报 B，而规则那边金额 / 紧迫度 / 决策全未知 → needs_info。
+NEED_ONLY_CONTENT = "客户说预算还在谈，先给个报价单看看"
 # 超过 60 字的长原文：验列表摘要的截断（60 字 + 「…」）。
 LONG_CONTENT = (
     "华远建设有限公司的刘经理说，下周一上午十点方便再聊一次，预算大概三十万左右，"
@@ -67,7 +70,13 @@ def test_post_sorting_returns_201_with_four_blocks(client: TestClient) -> None:
     assert body["dropped"] == []
 
     suggestion = body["suggestion"]
-    assert set(suggestion) == {"elements", "grading", "next_action"}
+    assert set(suggestion) == {
+        "elements",
+        "grading",
+        "grading_source",
+        "model_grading",
+        "next_action",
+    }
     assert suggestion["elements"]
     for element in suggestion["elements"]:
         assert set(element) == {
@@ -82,6 +91,9 @@ def test_post_sorting_returns_201_with_four_blocks(client: TestClient) -> None:
     assert suggestion["grading"]["value"] in ("A", "B", "C", "needs_info")
     assert suggestion["grading"]["reason"]
     assert suggestion["grading"]["basis"]
+    assert suggestion["grading_source"] == "rule"
+    # 模型自报的那份单独放着：假模型只看要素覆盖度，可以跟规则结论不一样。
+    assert suggestion["model_grading"]["value"] in ("A", "B", "C")
     assert suggestion["next_action"]["action"]
     assert suggestion["next_action"]["value_offered"]
 
@@ -149,7 +161,55 @@ def test_get_single_batch_keeps_model_text_and_parses_it(client: TestClient) -> 
     assert body["lead_name"] == LEAD["name"]
     assert isinstance(body["suggestion_json"], str)
     assert body["suggestion_json"].lstrip().startswith("{")
-    assert set(body["suggestion"]) == {"elements", "grading", "next_action"}
+    assert set(body["suggestion"]) == {
+        "elements",
+        "grading",
+        "grading_source",
+        "model_grading",
+        "next_action",
+    }
+
+
+def test_get_batch_grading_equals_post_grading(client: TestClient) -> None:
+    """同一张单：`POST /sorting` 与 `GET /sorting/batches/{id}` 的 `grading.value` 必须相等。
+
+    `suggestion_json` 里的模型原文不动（审计保真），接口另给 `model_grading` 做对比。
+    """
+    lead_id = _lead_id(client)
+    created = _sort(client, PHONE_CONTENT, lead_id).json()
+
+    detail = client.get(f"/sorting/batches/{created['batch_id']}").json()
+
+    assert created["suggestion"]["grading"]["value"] == detail["suggestion"]["grading"]["value"]
+    assert created["suggestion"]["grading"]["reason"] == detail["suggestion"]["grading"]["reason"]
+    assert created["suggestion"]["model_grading"] == detail["suggestion"]["model_grading"]
+    # 模型原文一个字都不改：解析回来还是它当时吐的那份。
+    stored = json.loads(detail["suggestion_json"])
+    assert stored["grading"] == detail["suggestion"]["model_grading"]
+
+
+def test_model_grading_can_differ_from_rule_grading(client: TestClient) -> None:
+    """模型自报 A、规则算 needs_info：同一张单上两份并存，详情页用的是规则那份。
+
+    构造方式：要素只覆盖「需求」一块（模型按覆盖度报 B），而金额 / 紧迫度 / 决策清晰度
+    全都未知 → 规则只能给 `needs_info`（上下界跨档）。
+    """
+    lead_id = _lead_id(client)
+    created = _sort(client, NEED_ONLY_CONTENT, lead_id)
+    assert created.status_code == 201, created.text
+    body = created.json()
+
+    grading = body["suggestion"]["grading"]
+    model_grading = body["suggestion"]["model_grading"]
+
+    assert grading["value"] == "needs_info"
+    assert model_grading["value"] == "B"
+    assert grading["value"] != model_grading["value"]
+
+    detail = client.get(f"/sorting/batches/{body['batch_id']}").json()
+    # 详情页给的是规则那份：不会被模型自报的 B 顶掉。
+    assert detail["suggestion"]["grading"]["value"] == "needs_info"
+    assert detail["suggestion"]["model_grading"]["value"] == "B"
 
 
 def test_get_unknown_batch_404(client: TestClient) -> None:

@@ -70,7 +70,7 @@ from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
 from salescopilot.services.review import ReviewService
 from salescopilot.services.shelf import ShelfService
-from salescopilot.services.sorting import SortingService
+from salescopilot.services.sorting import GRADING_SOURCE_RULE, SortingService
 from salescopilot.services.todo import TodoService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
@@ -1095,10 +1095,14 @@ def discard_draft(lead_id: str, draft_id: str, service: DraftDep):
 # ---------------------------------------------------------------- 分拣单
 
 
-def _suggestion_body(suggestion: SortingSuggestion | None) -> dict | None:
+def _suggestion_body(
+    suggestion: SortingSuggestion | None, model_grading: dict | None = None
+) -> dict | None:
     """已校验的三块建议：要素（已过滤）/ 分级（已兜底）/ 出库建议（已按缺项重算）。
 
     与分拣单里的 `suggestion_json`（模型原文）刻意不同：这里是给人看的版本。
+    `grading` 恒为规则算出的那一份（`grading_source` 标 `rule`），模型自报的那份放
+    `model_grading` 供对比——两者可以不一样，前端不该拿去当同一个数（ADR-0008）。
     """
     if suggestion is None:
         return None
@@ -1106,6 +1110,8 @@ def _suggestion_body(suggestion: SortingSuggestion | None) -> dict | None:
     return {
         "elements": raw["elements"],
         "grading": raw["grading"],
+        "grading_source": GRADING_SOURCE_RULE,
+        "model_grading": model_grading,
         "next_action": raw["next_action"],
     }
 
@@ -1133,7 +1139,7 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
         "confidence": batch.confidence,
         "scorer": batch.scorer,
         "created_at": batch.created_at,
-        "suggestion": _suggestion_body(outcome.suggestion),
+        "suggestion": _suggestion_body(outcome.suggestion, outcome.model_grading),
         "lead_candidates": outcome.lead_candidates,
         "dropped": outcome.dropped,
     }
@@ -1156,7 +1162,11 @@ def list_sorting_batches(service: SortingDep, status: str | None = None, limit: 
 @app.get("/sorting/batches/{batch_id}")
 def get_sorting_batch(batch_id: str, service: SortingDep):
     """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）、
-    投料原文全文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。"""
+    投料原文全文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。
+
+    `suggestion.grading` 与 `POST /sorting` 是同一份（规则现算，`grading_source=rule`）；
+    模型自报的那份在 `suggestion.model_grading`，两者可以不同——详情页显示的必须是前者。
+    """
     body, issues = service.get_batch(batch_id)
     if body is None:
         return JSONResponse(status_code=404, content=_issue_body(issues))
