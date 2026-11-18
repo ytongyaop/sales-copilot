@@ -22,6 +22,7 @@ from salescopilot.domain.matching import (
     normalize_with_alias,
 )
 from salescopilot.domain.models import CARD_SECTIONS
+from salescopilot.domain.rules import ValidationIssue
 
 # 出处片段至少这么长：太短的串（一两个字）在原文里到处都能模糊命中，当不了出处。
 MIN_SPAN_LEN = 4
@@ -179,6 +180,38 @@ def split_diagnostic(message: str) -> tuple[int | None, str]:
     if match is None:
         return None, message
     return int(match.group(1)), match.group(2)
+
+
+def contact_from_elements(elements: list[ElementHit]) -> str:
+    """从已过出处校验的要素里取联系方式：先认 `field='contact'`，再认取值里的手机号 / 邮箱。
+
+    只从要素里取（不回头翻原文）：人确认的是这些要素，新客户资料也只该按它们填。
+    多个候选时取**最小那个**（字符串序），保证同一批要素每次得到同一个联系方式。
+    """
+    for element in elements:
+        if element.field == "contact" and element.value.strip():
+            return element.value.strip()
+    for element in elements:
+        tokens = contact_tokens(element.value)
+        if tokens:
+            return min(tokens)
+    return ""
+
+
+# 拒绝分拣单必须给理由：至少 2 个字。一个字的「滚」说不清为什么，复核时等于没写。
+MIN_DECISION_REASON_LEN = 2
+
+
+def validate_decision_reason(action: str, reason: str | None) -> list[ValidationIssue]:
+    """校验处置理由：只有 `reject` 强制要理由，其余动作一律返回空列表。"""
+    if action != "reject":
+        return []
+    text = reason.strip() if isinstance(reason, str) else ""
+    if not text:
+        return [ValidationIssue("reason", "拒绝分拣单必须写明理由")]
+    if len(text) < MIN_DECISION_REASON_LEN:
+        return [ValidationIssue("reason", f"理由至少需要 {MIN_DECISION_REASON_LEN} 个字符")]
+    return []
 
 
 def build_next_action(elements: list[ElementHit], missing_sections: list[str]) -> dict:

@@ -40,6 +40,14 @@ SORTING_SCORERS: tuple[str, ...] = ("exact", "fuzzy", "vector", "llm", "review",
 # 分拣单的处置动作：只追加留痕，不覆盖原建议。
 SORTING_DECISIONS: tuple[str, ...] = ("accepted", "fixed_and_accepted", "rejected")
 
+# 处置动作 → 分拣单落到哪个状态：同意与改归属都算「通过」，拒绝就是拒绝。
+# 这张表只描述状态口径，谁有资格处置由用例层判（`services/sorting.py`）。
+SORTING_DECISION_STATUS: dict[str, str] = {
+    "accepted": "accepted",
+    "fixed_and_accepted": "accepted",
+    "rejected": "rejected",
+}
+
 # 分级写入的两种模式：先提议后确认（propose）/ 直接定（auto）。
 GRADING_MODES: tuple[str, ...] = ("propose", "auto")
 
@@ -258,8 +266,10 @@ class SortingBatch:
       `SORTING_STATUSES`，流转由用例层判定；
     - `suggestion_json`：四类判断的原始建议，按**原样 JSON 字符串**整段保存——
       审计要的是「当时到底吐了什么」，所以这里不解析、也不重新序列化；
+    - `dropped_json`：投料时被丢弃的要素诊断（JSON 数组，每项 `{"index", "reason"}`），
+      与 `suggestion_json` 一样按原样字符串保存；
     - `decided_at` / `decided_action`：人工处置留痕，动作取 `SORTING_DECISIONS`。
-      处置只写这两列，不改原建议。
+      处置只写这两列（外加状态），不改原建议。
     """
 
     id: str
@@ -272,6 +282,7 @@ class SortingBatch:
     lead_id: str | None = None
     decided_at: str | None = None
     decided_action: str | None = None
+    dropped_json: str = "[]"
 
 
 @dataclass(frozen=True)

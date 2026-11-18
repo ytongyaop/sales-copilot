@@ -182,6 +182,19 @@ class FakeSorting:
             seconds=0.0,
         )
 
+    def review(self, *, content: str, candidates: list[Candidate]) -> tuple[str | None, str]:
+        """灰区复核的假实现：取相似度最高的候选，理由写清「谁更像、像多少」。
+
+        确定性来自候选顺序（调用方已按分数倒序排好），同一批候选永远同一结论；
+        没有候选时明说挑不出来，不编一个客户。
+        """
+        self.review_calls += 1
+        self.last_candidates = list(candidates)
+        if not candidates:
+            return None, "没有可复核的候选"
+        best = candidates[0]
+        return best.lead_id, f"候选里「{best.name}」最接近（相似度 {best.score:.1f}），建议归给它"
+
 
 def _sorting_elements(content: str) -> list[dict]:
     """按固定顺序抽要素：基础信息 → 需求 → 决策 → 跟进；抽不到就不给这一条。"""

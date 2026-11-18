@@ -36,10 +36,10 @@
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_span_align.py tests\test_sorting_domain.py tests\test_sorting_service.py tests\test_sorting_api.py`；`/docs` 里发一次 `POST /sorting` 看到四块 JSON 且 `source_span` 能在原文定位
   - 预估：9h　依赖：T002、T002b
 
-- [ ] **[T004] 分拣确认与待认领池**
-  - 目标：同意 / 改归属 / 忽略三个动作各走通且只追加；`band='review'`（灰区无佐证 / 多候选 / L2 落在 0.80–0.92）的投料进待认领池，不落客户。
-  - 涉及文件：`src/salescopilot/services/sorting.py`、`src/salescopilot/adapters/db/sqlite.py`、`src/salescopilot/entrypoints/api/app.py`、`tests/test_sorting_confirm.py`（新建）
-  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_confirm.py` ＋ 全量 `pytest -q`；`GET /sorting/batches?pending_claim=1` 能过滤出在池的单
+- [x] **[T004] 分拣确认与待认领池** 🔒（schema：`sorting_batches.dropped_json`）
+  - 目标：同意 / 改归属 / 拒绝三个动作各走通且只追加；`band='review'`（灰区无佐证 / 多候选 / L2 落在 0.80–0.92）的投料进待认领池，不落客户；待认领池可认领（挂已有客户或新建），灰区可复核（只给建议、不落库）；投料时的丢弃诊断落 `dropped_json`。
+  - 涉及文件：`src/salescopilot/services/sorting.py`、`src/salescopilot/domain/sorting.py`、`src/salescopilot/domain/models.py`、`src/salescopilot/domain/ports.py`、`src/salescopilot/adapters/db/sqlite.py`、`src/salescopilot/adapters/llm/fake.py`、`src/salescopilot/adapters/llm/deepseek.py`、`src/salescopilot/adapters/llm/prompts_sorting.py`、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_sorting_confirm.py`（新建）、`tests/test_sorting_claim.py`（新建）、`tests/test_sorting_api_t004.py`（新建）
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_confirm.py tests\test_sorting_claim.py tests\test_sorting_api_t004.py` ＋ 全量 `pytest -q`；`GET /sorting/batches?status=pending_claim` 能过滤出在池的单
   - 预估：6h　依赖：T003
 
 ## 阶段 B：信息卡与分级（S2–S3）
@@ -87,7 +87,7 @@
 ## 汇总
 
 - 增量数：**12**（阶段 A 6 个：T001 / T002 / T002b / T002c / T003 / T004；B 2 个；C 2 个；D 2 个）
-- 总预估：**77 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 6；分项相加 76h，按主管口径记 77h），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
+- 总预估：**76 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 6），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
 - 依赖关系：**T002 → T002b → T003**（阈值先校准、再让分拣链路用上校准值，避免拿拍脑袋的阈值去跑真实投料）；其余依赖不变：T001 → T002 / T005，T003 → T004，T004 + T005 + T006 + T008 → T009，T009 → T010。
 - 排序原则：先数据层与迁移（T001，保证后面每一步都有地方落）→ 再按"分拣（含阈值校准）→ 卡片 → 分级 → 出库"的数据依赖推进 → 前端最后接（后端接口定型后再画页面）→ 最后换场并做全量验收。不勾完上一阶段不进下一阶段。
 - 并行机会：T002 与 T005 互不依赖，可并行；T002b 的 50 对标注样本可以提前单独标（纯人工，不占开发工时）；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次。

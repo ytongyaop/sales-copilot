@@ -266,16 +266,17 @@ def build_sorting_judge(live: bool | None = None) -> SortingJudge:
 
 
 def build_sorting_service(live: bool | None = None) -> SortingService:
-    """投料与分拣用例：线索 + 原文 + 分拣单三条仓储 + 分拣模型。
+    """投料与分拣用例：线索 + 原文 + 分拣单 + 事实四条仓储 + 分拣模型。
 
     向量本增量不装（`vector_score=None`）：归属只走精确键与字符串两级，
-    灰区一律进待认领池。
+    灰区一律进待认领池。事实仓储是 T004 的「同意」要用：要素落成事实前还要复核出处。
     """
     db = default_db_path()
     leads: LeadRepository = SqliteLeadRepository(db)
     raws: RawItemRepository = SqliteRawItemRepository(db)
     batches: SortingBatchRepository = SqliteSortingBatchRepository(db)
-    return SortingService(leads, raws, batches, build_sorting_judge(live))
+    facts: FactRepository = SqliteFactRepository(db)
+    return SortingService(leads, raws, batches, build_sorting_judge(live), facts=facts)
 
 
 def _resolve_live(live: bool | None) -> bool:

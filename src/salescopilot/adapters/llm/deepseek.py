@@ -20,8 +20,10 @@ from salescopilot.adapters.llm.prompts import (
     build_user_prompt,
 )
 from salescopilot.adapters.llm.prompts_sorting import (
+    REVIEW_SYSTEM_PROMPT,
     SORTING_PROMPT_VERSION,
     SORTING_SYSTEM_PROMPT,
+    build_review_user_prompt,
     build_sorting_user_prompt,
 )
 from salescopilot.domain.errors import ExtractError, SortingError
@@ -200,6 +202,44 @@ class DeepSeekSorting:
             )
 
         raise SortingError(f"分拣失败：{reason}（已尝试 {attempts} 次）")
+
+    def review(self, *, content: str, candidates: list[Candidate]) -> tuple[str | None, str]:
+        """灰区复核：从候选里挑一个（或 null）并给一句理由；失败抛 `SortingError`。
+
+        与 `judge` 同一套约定（`json_object` 模式、温度 0、同一条重试路径）。
+        模型挑了不在候选里的 id 一律当「没挑出来」——脏 id 绝不进建议。
+        """
+        allowed = {candidate.lead_id for candidate in candidates}
+        messages = [
+            {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_review_user_prompt(content=content, candidates=list(candidates)),
+            },
+        ]
+
+        attempts = 0
+        failure = "未知原因"
+        for attempt in range(self._max_retries + 1):
+            attempts = attempt + 1
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                payload = _parse_sorting(_message_text(response))
+            except Exception as exc:  # noqa: BLE001 - 网络与解析失败都走同一条重试路径
+                failure = _describe(exc)
+                continue
+            suggested = payload.get("lead_id")
+            reason = payload.get("reason")
+            if not isinstance(suggested, str) or suggested not in allowed:
+                suggested = None
+            return suggested, reason.strip() if isinstance(reason, str) else ""
+
+        raise SortingError(f"归属复核失败：{failure}（已尝试 {attempts} 次）")
 
 
 def _parse_sorting(text: str) -> dict:

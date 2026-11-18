@@ -134,8 +134,10 @@ class DraftGenerator(Protocol):
 class SortingBatchRepository(Protocol):
     """分拣单端口：只追加、按 id 查单条、按状态回查（待认领池 = `status='pending_claim'`）。
 
-    **故意没有 update / delete**：分拣单是审计流水，人工处置也只在流水上另记，
-    不改写已经落库的那一行。
+    **故意没有 update / delete**：分拣单是审计流水，人工处置只在流水上另记两个窄口：
+    - `decide`：只写 `status` / `decided_at` / `decided_action`；
+    - `attach_lead`：只写 `lead_id`（可选同时写状态），认领与改归属用。
+    两者都改不动 `suggestion_json` / `confidence` / `scorer` / `dropped_json`。
     """
 
     def add(self, batch: SortingBatch) -> None: ...
@@ -143,6 +145,10 @@ class SortingBatchRepository(Protocol):
     def get(self, batch_id: str) -> SortingBatch | None: ...
 
     def list_by_status(self, status: str) -> list[SortingBatch]: ...
+
+    def decide(self, batch_id: str, *, action: str, at: str) -> None: ...
+
+    def attach_lead(self, batch_id: str, *, lead_id: str, status: str | None = None) -> None: ...
 
 
 class GradingRepository(Protocol):
@@ -170,10 +176,14 @@ class SortingJudge(Protocol):
     - `candidates` 只在归属落在灰区（`band='review'`）且候选 ≤3 时非空：那是「这票货
       可能是哪几家」，供模型参考。精确键命中或判为新客户时**不传**，模型也就不会
       被问归属——调用方可据实现里的计数断言这一点。
+    - `review` 只给待认领池里的灰区单据做**一次归属复核**：从候选里挑一个（或明说
+      挑不出来）并给理由。它只是建议，用例层不据此改 `lead_id`，等人认领。
     失败（网络、超时、输出解析不了）一律抛 `domain/errors.py` 的 `SortingError`。
     """
 
     def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult: ...
+
+    def review(self, *, content: str, candidates: list[Candidate]) -> tuple[str | None, str]: ...
 
 
 class Embedder(Protocol):

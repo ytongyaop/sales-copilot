@@ -79,6 +79,9 @@ FIELD_LABELS = {
     "value": "取值",
     "csv_text": "CSV 内容",
     "default_owner": "默认归属人",
+    "action": "处置动作",
+    "reason": "理由",
+    "create_name": "客户名称",
 }
 
 
@@ -154,6 +157,26 @@ class SortingIn(BaseModel):
     content: str
     source: str
     lead_id: str | None = None
+
+
+class SortingConfirmIn(BaseModel):
+    """POST /sorting/{id}/confirm 的请求体：处置动作 + 可选的改归属目标 / 拒绝理由。
+
+    `action` 只认 accept（同意）/ fix（改归属后同意）/ reject（拒绝）；
+    取值合不合法由用例层的 `domain/sorting.py` 判，这里只声明形状。
+    """
+
+    action: str
+    lead_id: str | None = None
+    reason: str | None = None
+
+
+class SortingClaimIn(BaseModel):
+    """POST /sorting/{id}/claim 的请求体：挂已有客户（`lead_id`）或新建（`create_name`）。"""
+
+    lead_id: str | None = None
+    create_name: str | None = None
+    owner: str | None = None
 
 
 def get_lead_service() -> Iterator[LeadService]:
@@ -273,7 +296,10 @@ def _raw_body(item: RawItem) -> dict:
 
 
 def _fact_body(fact: Fact, *, model: str | None = None) -> dict:
-    """一条事实：`model` 只在 `source=llm` 且有账本时给（前端徽标显示 `AI·<模型名>`）。"""
+    """一条事实：`model` 只在 `source=llm` 且有账本时给（前端徽标显示 `AI·<模型名>`）。
+
+    `card_section` 是这条事实归信息卡哪一块（空字符串 = 还没归块，v1 的事实都是空）。
+    """
     return {
         "id": fact.id,
         "lead_id": fact.lead_id,
@@ -284,6 +310,7 @@ def _fact_body(fact: Fact, *, model: str | None = None) -> dict:
         "source_span": fact.source_span,
         "confidence": fact.confidence,
         "locked": fact.locked,
+        "card_section": fact.card_section,
         "model": model,
         "at": fact.at,
     }
@@ -765,8 +792,80 @@ def list_sorting_batches(service: SortingDep, status: str | None = None, limit: 
 
 @app.get("/sorting/batches/{batch_id}")
 def get_sorting_batch(batch_id: str, service: SortingDep):
-    """单张分拣单：带模型原文（`suggestion_json`）与解析后的视图（`suggestion`）。"""
+    """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）
+    与投料时的丢弃诊断（`dropped`）。"""
     body, issues = service.get_batch(batch_id)
     if body is None:
         return JSONResponse(status_code=404, content=_issue_body(issues))
     return body
+
+
+def _batch_view(service: SortingService, batch_id: str) -> dict | None:
+    """取一张分拣单的完整视图：与 `GET /sorting/batches/{id}` 同一份口径。
+
+    处置/认领成功后要回「改完的单」，这里不另拼字段，免得两处字段慢慢走偏。
+    """
+    body, _issues = service.get_batch(batch_id)
+    return body
+
+
+@app.post("/sorting/{batch_id}/confirm")
+def confirm_sorting_batch(batch_id: str, payload: SortingConfirmIn, service: SortingDep):
+    """处置一张分拣单：同意（要素落成事实）/ 改归属 / 拒绝。
+
+    200 返回 `{"batch", "applied", "skipped"}`：`applied` 是这次写进事实层的条数，
+    `skipped` 每项 `{"field", "reason"}`（出处复核不过 / 人工锁定 / 重复值）。
+    分拣单不存在 404；状态不对、缺理由、目标客户不存在一律 422 且不落库。
+    """
+    outcome = service.confirm(
+        batch_id, action=payload.action, lead_id=payload.lead_id, reason=payload.reason
+    )
+    if outcome.batch is None:
+        return JSONResponse(status_code=404, content=_issue_body(outcome.issues))
+    if outcome.issues:
+        return JSONResponse(status_code=422, content=_issue_body(outcome.issues))
+
+    return {
+        "batch": _batch_view(service, batch_id),
+        "applied": outcome.applied,
+        "skipped": outcome.skipped,
+    }
+
+
+@app.post("/sorting/{batch_id}/claim")
+def claim_sorting_batch(batch_id: str, payload: SortingClaimIn, service: SortingDep):
+    """从待认领池里认领：挂已有客户，或按名字新建客户。
+
+    200 返回 `{"batch", "lead_id", "warnings"}`；`warnings` 是「客户已建但要补录」这类
+    提醒（例如要素里没有联系方式）。分拣单不存在 404；状态不对、两个参数都没给或都给、
+    客户不存在一律 422。认领**不会**自动同意要素，仍要再调一次 confirm。
+    """
+    batch, issues = service.claim(
+        batch_id,
+        lead_id=payload.lead_id,
+        create_name=payload.create_name,
+        owner=payload.owner,
+    )
+    if batch is None:
+        status = 404 if any(issue.location == "batch_id" for issue in issues) else 422
+        return JSONResponse(status_code=status, content=_issue_body(issues))
+
+    return {
+        "batch": _batch_view(service, batch_id),
+        "lead_id": batch.lead_id,
+        "warnings": [{"location": issue.location, "message": issue.message} for issue in issues],
+    }
+
+
+@app.get("/sorting/{batch_id}/review")
+def review_sorting_batch(batch_id: str, service: SortingDep):
+    """灰区复核：待认领且候选 1–3 家时，返回建议归给谁与理由。
+
+    结果**只进响应、不落库**（不写 `lead_id`、不改 `suggestion_json`）：归属仍要人认领。
+    分拣单不存在 404；状态不对、没有候选（请直接新建）一律 422。
+    """
+    outcome = service.review_candidates(batch_id)
+    if outcome.issues:
+        status = 404 if any(issue.location == "batch_id" for issue in outcome.issues) else 422
+        return JSONResponse(status_code=status, content=_issue_body(outcome.issues))
+    return {"suggested_lead_id": outcome.lead_id, "reason": outcome.reason}

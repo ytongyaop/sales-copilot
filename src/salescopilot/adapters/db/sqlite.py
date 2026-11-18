@@ -16,6 +16,7 @@ from pathlib import Path
 
 from salescopilot.domain.models import (
     DEFAULT_TEMPLATE,
+    SORTING_DECISION_STATUS,
     AssignmentEvent,
     Draft,
     ExtractRun,
@@ -122,7 +123,8 @@ CREATE TABLE IF NOT EXISTS sorting_batches (
     scorer TEXT NOT NULL,
     created_at TEXT NOT NULL,
     decided_at TEXT,
-    decided_action TEXT
+    decided_action TEXT,
+    dropped_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS grading_history (
     id TEXT PRIMARY KEY,
@@ -175,7 +177,7 @@ _SELECT_DRAFT = (
 )
 _SELECT_SORTING = (
     "SELECT id, lead_id, raw_id, status, suggestion_json, confidence, scorer, created_at,"
-    " decided_at, decided_action FROM sorting_batches"
+    " decided_at, decided_action, dropped_json FROM sorting_batches"
 )
 _SELECT_GRADING = (
     "SELECT id, lead_id, ai_value, human_value, reason, mode, actor, at FROM grading_history"
@@ -194,6 +196,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     """
     conn.executescript(SCHEMA)
     _ensure_column(conn, "facts", "card_section", "TEXT NOT NULL DEFAULT ''")
+    # T004：分拣时的丢弃诊断也要能回看，旧库（T001–T003 造的）缺这一列就在这里补上。
+    _ensure_column(conn, "sorting_batches", "dropped_json", "TEXT NOT NULL DEFAULT '[]'")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -669,7 +673,10 @@ class SqliteSortingBatchRepository(_SqliteRepository):
     """`domain/ports.py` 的 `SortingBatchRepository` 的 SQLite 实现（只追加）。
 
     `suggestion_json` 原样进、原样出：不解析、不重新序列化，审计才对得上
-    「模型当时吐出的那串文本」。处置列（`decided_*`）本层不提供改写入口。
+    「模型当时吐出的那串文本」。人工处置只走两个窄接口：
+    - `decide`：只改 `status` / `decided_at` / `decided_action` 三列；
+    - `attach_lead`：只改 `lead_id`（可选同时改状态），认领与改归属用。
+    两者都不碰 `suggestion_json` / `confidence` / `scorer` / `dropped_json`。
     """
 
     def add(self, batch: SortingBatch) -> None:
@@ -677,8 +684,8 @@ class SqliteSortingBatchRepository(_SqliteRepository):
             conn.execute(
                 "INSERT INTO sorting_batches "
                 "(id, lead_id, raw_id, status, suggestion_json, confidence, scorer, created_at, "
-                "decided_at, decided_action) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "decided_at, decided_action, dropped_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     batch.id,
                     batch.lead_id,
@@ -690,6 +697,7 @@ class SqliteSortingBatchRepository(_SqliteRepository):
                     batch.created_at,
                     batch.decided_at,
                     batch.decided_action,
+                    batch.dropped_json,
                 ),
             )
 
@@ -707,6 +715,39 @@ class SqliteSortingBatchRepository(_SqliteRepository):
             ).fetchall()
         return [self._to_batch(row) for row in rows]
 
+    def decide(self, batch_id: str, *, action: str, at: str) -> None:
+        """记一次人工处置：**只改三列**（`status` / `decided_at` / `decided_action`）。
+
+        `status` 由 `SORTING_DECISION_STATUS` 从动作推出（同意与改归属都落到 `accepted`）。
+        动作不认识就抛 `ValueError`：那是调用方的编程错误，不是用户输入。
+        """
+        status = SORTING_DECISION_STATUS.get(action)
+        if status is None:
+            raise ValueError(f"未知的处置动作：{action}")
+        with self._open() as conn:
+            conn.execute(
+                "UPDATE sorting_batches SET status = ?, decided_at = ?, decided_action = ? "
+                "WHERE id = ?",
+                (status, at, action, batch_id),
+            )
+
+    def attach_lead(self, batch_id: str, *, lead_id: str, status: str | None = None) -> None:
+        """把分拣单挂到一条线索上：**只改 `lead_id`**，`status` 给了才一起改。
+
+        认领（`pending_claim → pending_review`）与改归属（换客户）都用它；
+        处置留痕（`decided_*`）不在这里写，避免「挂客户」被当成「已经同意」。
+        """
+        with self._open() as conn:
+            if status is None:
+                conn.execute(
+                    "UPDATE sorting_batches SET lead_id = ? WHERE id = ?", (lead_id, batch_id)
+                )
+            else:
+                conn.execute(
+                    "UPDATE sorting_batches SET lead_id = ?, status = ? WHERE id = ?",
+                    (lead_id, status, batch_id),
+                )
+
     @staticmethod
     def _to_batch(row: sqlite3.Row) -> SortingBatch:
         return SortingBatch(
@@ -720,6 +761,7 @@ class SqliteSortingBatchRepository(_SqliteRepository):
             lead_id=row["lead_id"],
             decided_at=row["decided_at"],
             decided_action=row["decided_action"],
+            dropped_json=row["dropped_json"],
         )
 
 

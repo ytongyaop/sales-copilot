@@ -49,3 +49,29 @@ def build_sorting_user_prompt(*, content: str, candidates: list[Candidate]) -> s
         for index, candidate in enumerate(candidates, start=1):
             lines.append(f"{index}. {candidate.name}（相似度 {candidate.score:.1f}）")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ 灰区复核（T004）
+
+# 复核只产出一句话建议，与三块分拣建议分开版本：改复核提示词不影响分拣留痕。
+REVIEW_PROMPT_VERSION = "v1"
+
+REVIEW_SYSTEM_PROMPT = """你在做一次归属复核：只判断这段原文最可能属于给定候选里的哪一家。
+
+输出要求（只输出一个 JSON 对象，不要解释文字，不要 Markdown 代码块）：
+{"lead_id":"候选里的客户 id，挑不出来就 null","reason":"一句话理由，必须引用原文里的字句"}
+
+硬约束：
+1. 只能从给定候选里挑 id；挑不出来就填 null，理由写清缺什么，**不要编造客户**；
+2. 理由不超过 60 字，且依据必须是原文里真实出现过的字句；
+3. 你给的是建议，不是结论：最终归属由人认领。"""
+
+
+def build_review_user_prompt(*, content: str, candidates: list[Candidate]) -> str:
+    """拼复核的 user 消息：原文 + 候选清单（带 id，模型只能从这里挑）。"""
+    lines = ["【原文】", content, "", "【候选客户】只能从下面这个清单里挑 id："]
+    for index, candidate in enumerate(candidates, start=1):
+        lines.append(
+            f"{index}. id={candidate.lead_id}　名称={candidate.name}　相似度={candidate.score:.1f}"
+        )
+    return "\n".join(lines)
