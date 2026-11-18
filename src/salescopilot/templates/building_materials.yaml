@@ -5,6 +5,17 @@ thresholds:
   feedback_window_hours: 4
   stale_followup_days: 3
   zombie_ratio_max: 0.15
+# 分级口径（ADR-0008）：分档只由规则算，模型不参与打分；权重与阈值只从这里读。
+grading:
+  # 本模板相对默认口径的微调：单笔金额跨度大（几千元到上百万元），金额权重上调 0.05、
+  # 紧迫度下调 0.05（报价窗口短，差几天不足以区分机会大小）；四项之和仍为 1.0。
+  weights: {amount: 0.35, urgency: 0.25, clarity: 0.2, fit: 0.2}
+  # 阈值各下调 0.05：本模板要素天然少（常缺决策流程与匹配点原文），沿用默认 0.75 会让
+  # 绝大多数线索停在 needs_info，A 档形同虚设。
+  bands:
+    a_min: 0.7
+    b_min: 0.4
+  default_mode: propose        # propose（先提议后确认）| auto（直接采纳）
 flow:
   - block: intake
   - block: first_contact

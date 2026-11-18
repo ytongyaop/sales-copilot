@@ -50,11 +50,12 @@
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_card_domain.py tests\test_card_api.py`；接口返回 `missing[]` 每项 `question` 非空（断言）
   - 预估：6h　依赖：T001
 
-- [ ] **[T006] 分级打分 + 双模式 + 留痕三列** 🔒（口径）
+- [x] **[T006] 分级打分 + 双模式 + 留痕三列** 🔒（口径）
   - 目标：权重从模板读，四维打分出 A/B/C + 理由 + 依据；提议 / 直接定两种模式都写 `grading_history`（AI 值 / 人工值 / 差异原因）。
-  - 涉及文件：`src/salescopilot/domain/grading.py`（新建）、`src/salescopilot/services/grading.py`（新建）、`src/salescopilot/adapters/template/loader.py`、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/templates/*.yaml`（加 `grading_weights`）、`tests/test_grading_domain.py`（新建）、`tests/test_grading_service.py`（新建）、`tests/test_templates.py`（改）
-  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_grading_domain.py tests\test_grading_service.py tests\test_templates.py` ＋ 全量 `pytest -q`；改判后查 `grading_history` 多一行三列齐全
+  - 涉及文件：`src/salescopilot/domain/grading.py`（新建）、`src/salescopilot/services/grading.py`（新建）、`src/salescopilot/domain/rules.py`（`grading` 段校验）、`src/salescopilot/entrypoints/bootstrap.py`、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/templates/*.yaml`（加 `grading:` 段）、`src/salescopilot/services/sorting.py`（分拣单分级改用 `grade_from_facts`）、`docs/decisions/0008-分级由规则主算.md`（新建）、`tests/test_grading_domain.py`（新建）、`tests/test_grading_service.py`（新建）、`tests/test_grading_api.py`（新建）、`tests/test_templates.py`（改）、`tests/test_sorting_service.py`（改）
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_grading_domain.py tests\test_grading_service.py tests\test_grading_api.py tests\test_templates.py` ＋ 全量 `pytest -q`；改判后查 `grading_history` 多一行三列齐全
   - 预估：8h　依赖：T001、T005（缺项参与匹配度打分）
+  - 实际：照仲裁结论 C 落地（分档永远由规则产出，模型只抽取）；分拣单的分级与详情页共用 `grade_from_facts`，因此分拣单上会出现第四种取值 `needs_info`（缺维度时不再硬判）
 
 ## 阶段 C：待办与复盘（S4–S5）
 

@@ -86,3 +86,96 @@ def test_terminal_block_must_be_last() -> None:
     issues = validate_template({**template, "flow": flow})
 
     assert any(issue.location == "flow[5]" and "close" in issue.message for issue in issues), issues
+
+
+# ------------------------------------------------------- 分级段（T006 / ADR-0008）
+
+
+def _with_grading(template: dict, **patch: object) -> dict:
+    """复制一份模板，只替换 `grading` 段里的指定键（其余保持原样）。"""
+    grading = {**template["grading"], **patch}
+    return {**template, "grading": grading}
+
+
+def test_all_templates_declare_grading_section() -> None:
+    """三份模板都带完整的 grading 段：四维权重（和为 1）、两个阈值、默认模式。"""
+    for name, template in _load().items():
+        grading = template["grading"]
+        assert set(grading["weights"]) == {"amount", "urgency", "clarity", "fit"}, name
+        assert abs(sum(grading["weights"].values()) - 1.0) <= 0.001, name
+        assert grading["bands"]["a_min"] > grading["bands"]["b_min"], name
+        assert grading["default_mode"] in ("propose", "auto"), name
+
+
+def test_missing_grading_section_rejected() -> None:
+    """缺 `grading` 段：顶层键缺一项 + grading 本身不合法，两条都要报出来。"""
+    template = _load()["edu_training"]
+    data = {key: value for key, value in template.items() if key != "grading"}
+
+    issues = validate_template(data)
+
+    assert any(issue.location == "<root>" and "grading" in issue.message for issue in issues), (
+        issues
+    )
+    assert any(issue.location == "grading" for issue in issues), issues
+
+
+def test_grading_weights_must_sum_to_one() -> None:
+    """权重和不是 1 → 报错（档位之间就没有可比性了）。"""
+    template = _load()["edu_training"]
+    weights = {**template["grading"]["weights"], "fit": 0.1}
+
+    issues = validate_template(_with_grading(template, weights=weights))
+
+    assert any(
+        issue.location == "grading.weights" and "之和必须为 1.0" in issue.message
+        for issue in issues
+    ), issues
+
+
+def test_grading_missing_weight_key_rejected() -> None:
+    """四维权重缺一项 → 报错并指到那个维度。"""
+    template = _load()["edu_training"]
+    weights = dict(template["grading"]["weights"])
+    del weights["clarity"]
+
+    issues = validate_template(_with_grading(template, weights=weights))
+
+    assert any(issue.location == "grading.weights.clarity" for issue in issues), issues
+
+
+def test_grading_negative_weight_rejected() -> None:
+    """负权重 → 报错（打分方向会反过来）。"""
+    template = _load()["edu_training"]
+    weights = {**template["grading"]["weights"], "amount": -0.1, "fit": 0.5}
+
+    issues = validate_template(_with_grading(template, weights=weights))
+
+    assert any(
+        issue.location == "grading.weights.amount" and "非负" in issue.message for issue in issues
+    ), issues
+
+
+def test_grading_bands_must_be_ordered_and_inside_unit_interval() -> None:
+    """`a_min` 不大于 `b_min` → 报错；阈值必须落在 (0,1) 内。"""
+    template = _load()["edu_training"]
+
+    swapped = validate_template(_with_grading(template, bands={"a_min": 0.4, "b_min": 0.6}))
+    assert any(
+        issue.location == "grading.bands.a_min" and "必须大于" in issue.message for issue in swapped
+    ), swapped
+
+    out_of_range = validate_template(_with_grading(template, bands={"a_min": 1.2, "b_min": 0.45}))
+    assert any(
+        issue.location == "grading.bands.a_min" and "0 < v < 1" in issue.message
+        for issue in out_of_range
+    ), out_of_range
+
+
+def test_grading_default_mode_must_be_known() -> None:
+    """默认模式只认 propose / auto。"""
+    template = _load()["edu_training"]
+
+    issues = validate_template(_with_grading(template, default_mode="silent"))
+
+    assert any(issue.location == "grading.default_mode" for issue in issues), issues

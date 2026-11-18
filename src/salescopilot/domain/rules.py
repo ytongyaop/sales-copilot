@@ -11,12 +11,18 @@ from datetime import date
 
 from salescopilot.domain.blocks import BLOCKS, Block
 from salescopilot.domain.card import declared_field_keys
+from salescopilot.domain.grading import (
+    GRADING_BAND_KEYS,
+    GRADING_WEIGHT_KEYS,
+    WEIGHT_SUM_TOLERANCE,
+)
 from salescopilot.domain.labels import block_label, field_label
 from salescopilot.domain.models import (
     ALLOWED_OBJECTIONS,
     ALLOWED_SOURCES,
     CARD_SECTIONS,
     EDITABLE_LEAD_FIELDS,
+    GRADING_MODES,
 )
 
 # 联系方式的最小长度与对应的原因文案：新建线索（这里）与 CSV 导入
@@ -27,7 +33,7 @@ CONTACT_TOO_SHORT = "联系方式至少需要 5 个字符"
 # 线索字段取值的长度上限：与事实取值同一口径（`domain/facts.py` 的 MAX_FACT_VALUE_LEN）。
 MAX_FIELD_VALUE_LEN = 200
 
-REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow", "card")
+REQUIRED_ROOT_KEYS = ("template", "name", "thresholds", "flow", "card", "grading")
 REQUIRED_THRESHOLD_KEYS = (
     "first_response_minutes",
     "feedback_window_hours",
@@ -330,6 +336,109 @@ def validate_template(data: dict, blocks: dict[str, Block] = BLOCKS) -> list[Val
     issues.extend(_check_flow(data.get("flow"), blocks, data.get("thresholds")))
     if "card" in data:
         issues.extend(_check_card(data.get("card")))
+    issues.extend(_check_grading(data.get("grading")))
+    return issues
+
+
+def _check_grading(grading: object) -> list[ValidationIssue]:
+    """校验模板的 `grading` 段：四维权重齐全、和为 1、非负；两个分档阈值合法；模式合法。
+
+    为什么这么严：分档是「规则主算」的唯一出口，权重少一项或和不是 1，档位就失去可比性；
+    `a_min` 不大于 `b_min` 会让 B 档区间为空（A 与 C 之间没有过渡），必须当场报出来。
+    位置写成 `grading.weights.<维度>` / `grading.bands.<阈值>`，上层可直接指到哪一项坏了。
+    """
+    if not isinstance(grading, dict):
+        return [ValidationIssue("grading", "grading 必须是映射（weights / bands / default_mode）")]
+
+    issues: list[ValidationIssue] = []
+    issues.extend(_check_grading_weights(grading.get("weights")))
+    issues.extend(_check_grading_bands(grading.get("bands")))
+
+    mode = grading.get("default_mode")
+    allowed = " / ".join(GRADING_MODES)
+    if not isinstance(mode, str) or not mode.strip():
+        issues.append(ValidationIssue("grading.default_mode", "default_mode 不能为空"))
+    elif mode.strip() not in GRADING_MODES:
+        issues.append(
+            ValidationIssue(
+                "grading.default_mode",
+                f"default_mode 必须是 {allowed} 之一（实际是 {mode!r}）",
+            )
+        )
+    return issues
+
+
+def _check_grading_weights(weights: object) -> list[ValidationIssue]:
+    """四维权重：四个键齐全、都是非负数值、和为 1.0（容差 `WEIGHT_SUM_TOLERANCE`）。"""
+    if not isinstance(weights, dict):
+        return [ValidationIssue("grading.weights", "weights 必须是映射（维度 -> 权重）")]
+
+    issues: list[ValidationIssue] = []
+    total = 0.0
+    complete = True
+    for key in GRADING_WEIGHT_KEYS:
+        location = f"grading.weights.{key}"
+        if key not in weights:
+            issues.append(ValidationIssue(location, f"缺少权重：{key}"))
+            complete = False
+            continue
+        value = weights[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            issues.append(ValidationIssue(location, f"{key} 权重必须是数值，实际是 {value!r}"))
+            complete = False
+        elif value < 0:
+            issues.append(ValidationIssue(location, f"{key} 权重必须非负，实际是 {value!r}"))
+            complete = False
+        else:
+            total += float(value)
+
+    extra = [key for key in weights if key not in GRADING_WEIGHT_KEYS]
+    if extra:
+        allowed = "、".join(GRADING_WEIGHT_KEYS)
+        issues.append(
+            ValidationIssue(
+                f"grading.weights.{extra[0]}",
+                f"未知的维度「{extra[0]}」：只允许 {allowed}",
+            )
+        )
+
+    if complete and abs(total - 1.0) > WEIGHT_SUM_TOLERANCE:
+        issues.append(
+            ValidationIssue(
+                "grading.weights",
+                f"四项权重之和必须为 1.0（实际 {total:.4f}）",
+            )
+        )
+    return issues
+
+
+def _check_grading_bands(bands: object) -> list[ValidationIssue]:
+    """两个分档阈值：都在 (0,1) 内，且 `a_min` 必须大于 `b_min`（否则 B 档为空）。"""
+    if not isinstance(bands, dict):
+        return [ValidationIssue("grading.bands", "bands 必须是映射（a_min / b_min）")]
+
+    issues: list[ValidationIssue] = []
+    values: dict[str, float] = {}
+    for key in GRADING_BAND_KEYS:
+        location = f"grading.bands.{key}"
+        if key not in bands:
+            issues.append(ValidationIssue(location, f"缺少分档阈值：{key}"))
+            continue
+        value = bands[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            issues.append(ValidationIssue(location, f"{key} 必须是数值，实际是 {value!r}"))
+        elif not 0 < float(value) < 1:
+            issues.append(ValidationIssue(location, f"{key} 必须满足 0 < v < 1，实际是 {value!r}"))
+        else:
+            values[key] = float(value)
+
+    if len(values) == len(GRADING_BAND_KEYS) and values["a_min"] <= values["b_min"]:
+        issues.append(
+            ValidationIssue(
+                "grading.bands.a_min",
+                f"a_min 必须大于 b_min（实际 a_min={values['a_min']}, b_min={values['b_min']}）",
+            )
+        )
     return issues
 
 

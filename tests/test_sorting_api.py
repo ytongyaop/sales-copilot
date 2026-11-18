@@ -78,7 +78,9 @@ def test_post_sorting_returns_201_with_four_blocks(client: TestClient) -> None:
             "confidence",
         }
         assert element["source_span"] in PHONE_CONTENT, element
-    assert suggestion["grading"]["value"] in ("A", "B", "C")
+    # 分级由规则算出（缺金额与决策者时可能是 needs_info），不再是模型自报的 A/B/C。
+    assert suggestion["grading"]["value"] in ("A", "B", "C", "needs_info")
+    assert suggestion["grading"]["reason"]
     assert suggestion["grading"]["basis"]
     assert suggestion["next_action"]["action"]
     assert suggestion["next_action"]["value_offered"]

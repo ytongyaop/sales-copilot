@@ -10,6 +10,7 @@
 
 import itertools
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 from salescopilot.adapters.db.sqlite import (
@@ -18,8 +19,41 @@ from salescopilot.adapters.db.sqlite import (
     SqliteSortingBatchRepository,
 )
 from salescopilot.adapters.llm.fake import FakeSorting
-from salescopilot.domain.models import INITIAL_STAGE, Lead, SortingBatch
+from salescopilot.adapters.template.loader import load_all
+from salescopilot.domain.grading import grade_from_facts
+from salescopilot.domain.models import INITIAL_STAGE, Fact, Lead, SortingBatch
 from salescopilot.services.sorting import SortingService
+
+# 真实模板：分拣单的分级要按线索自己的模板 `grading` 段算（权重与阈值不从代码读）。
+TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "src" / "salescopilot" / "templates"
+TEMPLATES = load_all(TEMPLATES_DIR)
+
+# 假时钟的日期部分固定是这一天：紧迫度按「距今天几天」分档，必须钉住。
+TODAY = date(2026, 11, 18)
+
+
+def _template_loader(key: str) -> dict:
+    return TEMPLATES[key]
+
+
+def _facts_from(elements, lead_id: str) -> list[Fact]:
+    """把已校验的要素映射成事实（测试侧独立实现），用来对账分拣单的分级。"""
+    return [
+        Fact(
+            id=f"fact-{index}",
+            lead_id=lead_id,
+            raw_id="",
+            field=element.field,
+            value=element.value,
+            source="rule",
+            source_span=element.source_span,
+            confidence=element.confidence,
+            locked=False,
+            at="",
+        )
+        for index, element in enumerate(elements)
+    ]
+
 
 # 带手机号：L0 精确键应命中下面那条线索。
 PHONE_CONTENT = "13800001111 那边说预算三十万，下周一下午再聊"
@@ -62,7 +96,20 @@ def _service(
     )
     leads.add(lead)
     judge = FakeSorting(bad_span=bad_span)
-    return SortingService(leads, raws, batches, judge, clock=_clock()), judge, raws, batches, lead
+    return (
+        SortingService(
+            leads,
+            raws,
+            batches,
+            judge,
+            clock=_clock(),
+            template_loader=_template_loader,
+        ),
+        judge,
+        raws,
+        batches,
+        lead,
+    )
 
 
 def test_designated_lead_is_attributed_and_waits_for_review(tmp_path: Path) -> None:
@@ -79,7 +126,15 @@ def test_designated_lead_is_attributed_and_waits_for_review(tmp_path: Path) -> N
     assert outcome.batch.confidence == 100.0
     assert outcome.suggestion is not None
     assert outcome.suggestion.elements, "至少要有要素，否则分拣单没有意义"
-    assert outcome.suggestion.grading["value"] in ("A", "B", "C")
+    # 分级只由规则产出：与详情页同一个函数、同一份模板权重（ADR-0008）。
+    expected = grade_from_facts(
+        _template_loader("edu_training"),
+        _facts_from(outcome.suggestion.elements, lead.id),
+        today=TODAY,
+    )
+    assert outcome.suggestion.grading["value"] == expected.value
+    assert outcome.suggestion.grading["reason"] == expected.reason
+    assert outcome.suggestion.grading["basis"] == expected.basis
     assert outcome.suggestion.next_action["action"]
 
 

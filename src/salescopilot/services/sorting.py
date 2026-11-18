@@ -5,7 +5,9 @@
   L1 只走字符串，L2 向量本增量**只留参数不实装**（`vector_score=None`）；
   灰区与「没有候选」一律进待认领池，不猜、不落客户；
 - 要素 / 分级 / 出库三块由 `domain/sorting.py` 校验与重算：`source_span` 对不上原文
-  就丢弃那一条并记诊断，分级不合法就用规则兜底，出库建议按「先补缺项」重算；
+  就丢弃那一条并记诊断；分级**一律按规则算**（`domain/grading.py`，与客户详情页同一套
+  口径，见 ADR-0008），模型给的那份只留在 `suggestion_json` 里供审计；出库建议按
+  「先补缺项」重算；
   时间类字段（`appointment_at` 等）的取值必须是 `YYYY-MM-DD`，模型给「下周三」
   这类原话一律丢弃并记诊断——本层不猜日期，换算靠提示词里给模型的今天日期；
 - 模型返回的原始 JSON 文本原样落 `suggestion_json`（审计要「当时到底吐了什么」），
@@ -28,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from salescopilot.domain.card import declared_sections
 from salescopilot.domain.errors import SortingError
 from salescopilot.domain.facts import allowed_fact_fields, decide_merge, fields_from_facts
+from salescopilot.domain.grading import GRADE_NEEDS_INFO, grade_from_facts, parse_iso_date
 from salescopilot.domain.matching import (
     Candidate,
     MatchDecision,
@@ -42,6 +45,7 @@ from salescopilot.domain.models import (
     DEFAULT_TEMPLATE,
     INITIAL_STAGE,
     SORTING_STATUSES,
+    Fact,
     Lead,
     SortingBatch,
 )
@@ -66,7 +70,6 @@ from salescopilot.domain.sorting import (
     build_next_action,
     contact_from_elements,
     contact_tokens,
-    grade_from_elements,
     normalized_org,
     org_name_candidates,
     split_diagnostic,
@@ -78,9 +81,6 @@ from salescopilot.services.leads import utc_now_iso
 
 # 灰区一次最多把这么多候选交给模型参考：候选越多，模型越容易瞎猜。
 MAX_REVIEW_CANDIDATES = 3
-
-# 分级只认这三个值；不合法的分级一律走规则兜底。
-GRADING_VALUES = ("A", "B", "C")
 
 # 列表接口的条数上限：够一屏，也挡得住「一次拉全表」。
 MAX_BATCH_LIMIT = 200
@@ -106,9 +106,6 @@ CLAIM_SOURCE = "other"
 # 认领时新建的客户名称至少 2 个字（与跟进结论的 2 字口径一致）。
 MIN_LEAD_NAME_LEN = 2
 
-# 分级兜底函数：入参是已过出处校验的要素，返回 {"value", "reason", "basis"}。
-Grader = Callable[[list[ElementHit]], dict]
-
 # 模板里 label 带这些字的就是时间类字段：取值必须是 ISO 日期，不许留「下周三」。
 TIME_FIELD_LABELS: tuple[str, ...] = ("时间", "日期")
 
@@ -119,7 +116,7 @@ class SortingOutcome:
 
     - `batch` 为 None 表示没生成分拣单（原文校验不过、线索不存在、模型失败，
       或没有任何可用要素可供出库建议），此时 `issues` 说明原因；
-    - `suggestion` 是**已校验**的三块建议（要素已过滤、分级已兜底、出库建议已重算），
+    - `suggestion` 是**已校验**的三块建议（要素已过滤、分级已按规则算出、出库建议已重算），
       与 `batch.suggestion_json`（模型原文）刻意不同：一个给人看，一个给审计看；
     - `dropped` 每项形如 `{"index", "reason"}`，`index` 是模型输出里的下标；
     - `lead_candidates` 是这次落库的归属候选（`batch.candidates_json` 的同一份内容，
@@ -173,7 +170,6 @@ class SortingService:
         raws: RawItemRepository,
         batches: SortingBatchRepository,
         extractor: SortingJudge,
-        grader: Grader | None = None,
         clock: Callable[[], str] | None = None,
         thresholds: MatchThresholds | None = None,
         alias_table: dict[str, str] | None = None,
@@ -181,20 +177,23 @@ class SortingService:
         facts: FactRepository | None = None,
         template_loader: Callable[[str], dict] | None = None,
     ) -> None:
-        """`extractor` 是分拣模型（要素 / 分级 / 出库一次出）；`grader` 是分级的规则兜底。
+        """`extractor` 是分拣模型（要素 / 分级 / 出库一次出），但**分级不由它定**。
+
+        分级一律走 `domain/grading.py`（ADR-0008）：模型给的那份只留在 `suggestion_json`
+        里供审计，不再参与分档，也不再有「模型分级不合法 → 兜底」这条分支。
 
         `vector_score`：L2 向量的分数。本增量不装向量模型，恒为 None；参数留在签名里，
         将来接上向量只换装配，不用改用例。
         `facts`：人工处置要把要素落成事实，装配点必须传；没传时确认类用例会返回
         一条「未装配事实仓储」的问题，而不是悄悄什么都不写。
         `template_loader`：落事实时用它取「该客户模板声明了哪些信息卡字段」，
-        白名单 = 旧默认 ∪ 模板声明；没装配时退回旧默认（行为与改造前一致）。
+        白名单 = 旧默认 ∪ 模板声明；分级时用它取「该模板的 `grading` 段」。
+        没装配时这两处都退回旧口径（白名单退回旧默认、分级不出档）。
         """
         self._leads = leads
         self._raws = raws
         self._batches = batches
         self._extractor = extractor
-        self._grader: Grader = grader if grader is not None else grade_from_elements
         self._clock = clock if clock is not None else utc_now_iso
         self._thresholds = thresholds if thresholds is not None else MatchThresholds()
         self._aliases = dict(alias_table or {})
@@ -223,6 +222,40 @@ class SortingService:
                 if any(word in item["label"] for word in TIME_FIELD_LABELS):
                     names.add(item["key"])
         return names
+
+    def _grade(self, elements: list[ElementHit], lead_id: str | None) -> dict:
+        """按该客户模板的 `grading` 段给这张分拣单分级（与详情页同一套规则）。
+
+        权重与分档阈值**只从模板读**；线索还没定（待认领池）时用默认模板的口径——
+        模板里没有 `grading` 段会抛 `KeyError`，那是模板校验的漏洞，不该在这里被吞掉。
+        模板取不到（用例没装配模板加载器）时不出档，明确写「无法按规则分级」，
+        而不是偷偷退回一套写死在代码里的阈值。
+        """
+        spec = self._template_spec(lead_id) or self._default_template_spec()
+        today = parse_iso_date(self._today())
+        if spec is None or today is None:
+            return {
+                "value": GRADE_NEEDS_INFO,
+                "reason": "模板未装配或时钟不是 YYYY-MM-DD，无法按规则分级",
+                "basis": [],
+            }
+
+        result = grade_from_facts(spec, _facts_from_elements(elements, lead_id or ""), today=today)
+        return {
+            "value": result.value,
+            "reason": result.reason,
+            "basis": list(result.basis),
+        }
+
+    def _default_template_spec(self) -> dict | None:
+        """默认模板的规格：待认领池里的单还没有客户，先用默认口径分级。"""
+        if self._template_loader is None:
+            return None
+        try:
+            spec = self._template_loader(DEFAULT_TEMPLATE)
+        except KeyError:
+            return None
+        return spec if isinstance(spec, dict) else None
 
     def sort(self, *, content: str, source: str, lead_id: str | None = None) -> SortingOutcome:
         """一段原文进，一张分拣单出；归属未定时 `lead_id` 为空、状态进待认领池。"""
@@ -274,15 +307,9 @@ class SortingService:
         elements, diagnostics = validate_elements(raw.content, kept_raw)
         dropped = bad_dates + _dropped(diagnostics, index_map)
 
-        # 5) 分级：模型的合规就用它，不合规按要素规则兜底（不阻断分拣）。
-        grading = _clean_grading(result.payload.get("grading"))
-        if grading is None:
-            fallback = self._grader(elements)
-            grading = {
-                "value": fallback.get("value", ""),
-                "reason": f"模型分级不可用，按要素规则兜底：{fallback.get('reason', '')}",
-                "basis": list(fallback.get("basis", [])),
-            }
+        # 5) 分级：一律按规则算（ADR-0008），与客户详情页同一套口径；
+        #    模型给的 grading 不参与分档，只留在 suggestion_json 里供审计。
+        grading = self._grade(elements, resolved_id)
 
         # 6) 出库建议：按缺项规则重算；没有任何可用依据就拒绝生成（不落一张空单）。
         missing = [
@@ -882,23 +909,27 @@ def _dropped(diagnostics: list[str], index_map: list[int] | None = None) -> list
     return dropped
 
 
-def _clean_grading(raw: object) -> dict | None:
-    """校验模型给的分级：`value` 必须是 A/B/C、`reason` 非空、`basis` 是字符串列表。
+def _facts_from_elements(elements: list[ElementHit], lead_id: str) -> list[Fact]:
+    """把已过出处校验的要素临时映射成事实（**不落库**）：分级规则只认事实的形状。
 
-    不合规返回 None，由用例层走规则兜底——**不修补**模型的值，也不猜它想说什么。
+    这样「分拣单上的等级」与「详情页分级」走的是同一个函数、同一份权重，
+    不会出现两套口径各说各话。`at` 留空、`source` 记 `rule`：这些是内存里的临时对象。
     """
-    if not isinstance(raw, dict):
-        return None
-    value = raw.get("value")
-    reason = raw.get("reason")
-    basis = raw.get("basis", [])
-    if not isinstance(value, str) or value.strip().upper() not in GRADING_VALUES:
-        return None
-    if not isinstance(reason, str) or not reason.strip():
-        return None
-    if not isinstance(basis, list) or not all(isinstance(item, str) for item in basis):
-        return None
-    return {"value": value.strip().upper(), "reason": reason.strip(), "basis": list(basis)}
+    return [
+        Fact(
+            id=f"element-{index}",
+            lead_id=lead_id,
+            raw_id="",
+            field=element.field,
+            value=element.value,
+            source="rule",
+            source_span=element.source_span,
+            confidence=element.confidence,
+            locked=False,
+            at="",
+        )
+        for index, element in enumerate(elements)
+    ]
 
 
 def _loads(text: str) -> dict | None:

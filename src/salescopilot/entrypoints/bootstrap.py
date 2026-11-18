@@ -14,6 +14,7 @@ from salescopilot.adapters.db.sqlite import (
     SqliteExtractRunRepository,
     SqliteFactRepository,
     SqliteFollowupRepository,
+    SqliteGradingRepository,
     SqliteLeadRepository,
     SqliteRawItemRepository,
     SqliteSortingBatchRepository,
@@ -43,6 +44,7 @@ from salescopilot.domain.ports import (
     FactExtractor,
     FactRepository,
     FollowupRepository,
+    GradingRepository,
     LeadRepository,
     RawItemRepository,
     SortingBatchRepository,
@@ -57,6 +59,7 @@ from salescopilot.services.dashboard import DashboardService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
+from salescopilot.services.grading import GradingService
 from salescopilot.services.import_service import ImportService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.knowledge import KnowledgeService
@@ -268,6 +271,15 @@ def build_draft_service(live: bool | None = None) -> DraftService:
         drafts,
         followups=followups,
     )
+
+
+def build_grading_service() -> GradingService:
+    """分级用例：线索 + 事实 + 分级留痕三条仓储 + 模板加载器（权重与阈值按模板读）。"""
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    facts: FactRepository = SqliteFactRepository(db)
+    history: GradingRepository = SqliteGradingRepository(db)
+    return GradingService(leads, facts, history, template_loader)
 
 
 def build_sorting_judge(live: bool | None = None) -> SortingJudge:

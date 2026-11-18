@@ -18,12 +18,14 @@ from starlette.requests import Request
 from salescopilot.domain.blocks import BLOCKS
 from salescopilot.domain.card import Card
 from salescopilot.domain.dashboard import Dashboard
+from salescopilot.domain.grading import GradingResult
 from salescopilot.domain.labels import block_label
 from salescopilot.domain.models import (
     DEFAULT_TEMPLATE,
     ExtractRun,
     Fact,
     Followup,
+    GradingRecord,
     Lead,
     RawItem,
     StageEvent,
@@ -38,6 +40,7 @@ from salescopilot.entrypoints.bootstrap import (
     build_draft_service,
     build_flow_service,
     build_followup_service,
+    build_grading_service,
     build_import_service,
     build_ingest_service,
     build_lead_service,
@@ -54,6 +57,7 @@ from salescopilot.services.dashboard import DashboardService
 from salescopilot.services.draft import DraftService
 from salescopilot.services.flow import FlowService
 from salescopilot.services.followup import FollowupService
+from salescopilot.services.grading import GradingService
 from salescopilot.services.import_service import ImportService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
@@ -85,6 +89,8 @@ FIELD_LABELS = {
     "action": "处置动作",
     "reason": "理由",
     "create_name": "客户名称",
+    "mode": "分级模式",
+    "actor": "操作者",
 }
 
 
@@ -182,6 +188,18 @@ class SortingClaimIn(BaseModel):
     owner: str | None = None
 
 
+class GradingDecideIn(BaseModel):
+    """POST /leads/{id}/grading/decide 的请求体：定档 + 改判理由 + 可选模式与操作者。
+
+    `value` 只能是 A / B / C；`reason` 在改档时必填（≥2 字），由用例层判。
+    """
+
+    value: str
+    reason: str | None = None
+    mode: str | None = None
+    actor: str | None = None
+
+
 def get_lead_service() -> Iterator[LeadService]:
     """每个请求装配一次：数据库路径随环境变量变化，测试可直接 monkeypatch 环境变量。
 
@@ -234,6 +252,10 @@ def get_card_service() -> Iterator[CardService]:
     yield build_card_service()
 
 
+def get_grading_service() -> Iterator[GradingService]:
+    yield build_grading_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -246,6 +268,7 @@ DashboardDep = Annotated[DashboardService, Depends(get_dashboard_service)]
 ImportDep = Annotated[ImportService, Depends(get_import_service)]
 SortingDep = Annotated[SortingService, Depends(get_sorting_service)]
 CardDep = Annotated[CardService, Depends(get_card_service)]
+GradingDep = Annotated[GradingService, Depends(get_grading_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -397,6 +420,44 @@ def _card_body(card: Card) -> dict:
             for section in card.sections
         ],
         "missing": [dict(item) for item in card.missing],
+    }
+
+
+def _grading_body(result: GradingResult) -> dict:
+    """一次分级的结果：档次、上下界、四维明细、中文理由与原文依据。
+
+    `low` / `high` 保留 4 位小数：四维齐全时两者相等，跨档时人一眼看出「差哪一档」。
+    """
+    return {
+        "value": result.value,
+        "low": round(result.low, 4),
+        "high": round(result.high, 4),
+        "dims": [
+            {
+                "key": dim.key,
+                "label": dim.label,
+                "weight": dim.weight,
+                "known": dim.known,
+                "score": dim.score,
+            }
+            for dim in result.dims
+        ],
+        "reason": result.reason,
+        "basis": list(result.basis),
+    }
+
+
+def _grading_record_body(record: GradingRecord) -> dict:
+    """一行分级留痕：AI 值 / 人工值 / 理由三列 ＋ 模式、操作者与时间。"""
+    return {
+        "id": record.id,
+        "lead_id": record.lead_id,
+        "mode": record.mode,
+        "at": record.at,
+        "ai_value": record.ai_value,
+        "human_value": record.human_value,
+        "reason": record.reason,
+        "actor": record.actor,
     }
 
 
@@ -700,6 +761,56 @@ def get_lead_card(lead_id: str, service: CardDep):
     if card is None:
         return JSONResponse(status_code=404, content=_issue_body(issues))
     return _card_body(card)
+
+
+# ------------------------------------------------------------------ 客户分级
+
+
+def _grading_status(issues: list[ValidationIssue]) -> int:
+    """分级接口的状态码：线索不存在 404，其余（取值非法 / 缺理由 / 模式不认识）422。"""
+    if any(issue.location == "lead_id" for issue in issues):
+        return 404
+    return 422
+
+
+@app.post("/leads/{lead_id}/grading/propose")
+def propose_grading(lead_id: str, service: GradingDep, mode: str | None = None):
+    """按规则出一次分级建议：返回档次、上下界、四维明细、理由与原文依据。
+
+    `mode` 不传就用模板 `grading.default_mode`；传 `auto` 时建议会立刻被采纳
+    （`grading_history` 落两行：建议 + 采纳）。线索不存在 404，模式非法 422。
+    """
+    result, issues = service.propose(lead_id, mode=mode)
+    if result is None:
+        return JSONResponse(status_code=_grading_status(issues), content=_issue_body(issues))
+    return _grading_body(result)
+
+
+@app.post("/leads/{lead_id}/grading/decide", status_code=201)
+def decide_grading(lead_id: str, payload: GradingDecideIn, service: GradingDep):
+    """人工定档：成功 201 返回新写的那行留痕（AI 值 / 人工值 / 理由）。
+
+    改档必须写理由（≥2 字），不改档可空；`needs_info` 直接定档同样要理由。
+    """
+    decision, issues = service.decide(
+        lead_id,
+        value=payload.value,
+        reason=payload.reason,
+        actor=payload.actor,
+        mode=payload.mode,
+    )
+    if decision is None:
+        return JSONResponse(status_code=_grading_status(issues), content=_issue_body(issues))
+    return _grading_record_body(decision.record)
+
+
+@app.get("/leads/{lead_id}/grading/history")
+def list_grading_history(lead_id: str, service: GradingDep):
+    """该客户的分级留痕：按时间倒序（最新一行在最前）；线索不存在 404。"""
+    rows, issues = service.history(lead_id)
+    if issues:
+        return JSONResponse(status_code=404, content=_issue_body(issues))
+    return rows
 
 
 @app.patch("/leads/{lead_id}/facts/{field}")
