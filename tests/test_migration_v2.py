@@ -13,6 +13,7 @@ from pathlib import Path
 
 from salescopilot.adapters.db.sqlite import (
     SqliteFactRepository,
+    SqliteFollowupRepository,
     SqliteGradingRepository,
     SqliteLeadRepository,
     SqlitePreferenceSampleRepository,
@@ -70,6 +71,18 @@ CREATE TABLE sorting_batches (
     decided_at TEXT,
     decided_action TEXT,
     dropped_json TEXT NOT NULL DEFAULT '[]'
+);
+"""
+
+# T006 形态的跟进表：只有三要素 + 时间，还没有 `value_provided`。
+FOLLOWUP_V1_SCHEMA = """
+CREATE TABLE followups (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    conclusion TEXT NOT NULL,
+    objection TEXT NOT NULL,
+    next_followup_at TEXT NOT NULL,
+    at TEXT NOT NULL
 );
 """
 
@@ -212,6 +225,40 @@ def test_old_sorting_table_gets_candidates_json_once(tmp_path: Path) -> None:
     assert batch.suggestion_json == '{"elements": []}'
     # 旧行没有候选：迁移后是空数组字符串，不是 NULL、也不是被猜出来的候选
     assert batch.candidates_json == "[]"
+
+
+def test_old_followup_table_gets_value_provided_once(tmp_path: Path) -> None:
+    """旧跟进表（没有 `value_provided`）补列：旧记录保留，跑两次列也只加一个。"""
+    db = tmp_path / "old_followup.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(FOLLOWUP_V1_SCHEMA)
+        conn.execute(
+            "INSERT INTO followups (id, lead_id, conclusion, objection, next_followup_at, at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "followup-old",
+                "lead-1",
+                "客户说下周再谈",
+                "price",
+                "2026-11-20",
+                "2026-11-18T09:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    SqliteFollowupRepository(db)
+    SqliteFollowupRepository(db)  # 第二次初始化：不报错，也不重复加列
+
+    assert _columns(db, "followups").count("value_provided") == 1
+    stored = SqliteFollowupRepository(db).list_for("lead-1")
+    assert [item.id for item in stored] == ["followup-old"]
+    assert stored[0].conclusion == "客户说下周再谈"
+    # 旧记录没有价值标记：迁移后是空串（= 无价值跟进），不是 NULL、也不是被猜出来的
+    assert stored[0].value_provided == ""
+    assert _count(db, "followups") == 1
 
 
 def test_card_sections_contract() -> None:

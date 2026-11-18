@@ -66,6 +66,7 @@ from salescopilot.services.knowledge import KnowledgeService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
 from salescopilot.services.sorting import SortingService
+from salescopilot.services.todo import TodoService
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
@@ -280,6 +281,19 @@ def build_grading_service() -> GradingService:
     facts: FactRepository = SqliteFactRepository(db)
     history: GradingRepository = SqliteGradingRepository(db)
     return GradingService(leads, facts, history, template_loader)
+
+
+def build_todo_service() -> TodoService:
+    """今日待办用例：线索 + 事实 + 跟进 + 分级留痕四条仓储 + 模板加载器。
+
+    排序口径全在 `domain/todo.py`；价值文案与条目上限按每条线索自己的模板读。
+    """
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    facts: FactRepository = SqliteFactRepository(db)
+    followups: FollowupRepository = SqliteFollowupRepository(db)
+    history: GradingRepository = SqliteGradingRepository(db)
+    return TodoService(leads, facts, followups, history, template_loader)
 
 
 def build_sorting_judge(live: bool | None = None) -> SortingJudge:

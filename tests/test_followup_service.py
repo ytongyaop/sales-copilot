@@ -96,3 +96,34 @@ def test_list_for_is_chronological(tmp_path: Path) -> None:
     stored = service.list_for("lead-1")
     assert [item.at for item in stored] == sorted(item.at for item in stored)
     assert stored[1].conclusion == "客户要求先看资料"
+
+
+def test_value_provided_roundtrip(tmp_path: Path) -> None:
+    """「本次提供的价值」写进去能原样读回（前后空格去掉）。"""
+    service, leads = _build(tmp_path)
+    _add_lead(leads, "lead-1")
+
+    ok, issues, item = service.record("lead-1", **VALID, value_provided="  同类客户案例  ")
+
+    assert (ok, issues) == (True, [])
+    assert item is not None
+    assert item.value_provided == "同类客户案例"
+    assert service.list_for("lead-1")[0].value_provided == "同类客户案例"
+
+
+def test_empty_value_provided_is_allowed_and_marked(tmp_path: Path) -> None:
+    """不填价值不算错：落库为空串，等于显式标记「这次是无价值跟进」（供复盘统计）。"""
+    service, leads = _build(tmp_path)
+    _add_lead(leads, "lead-1")
+
+    ok, issues, item = service.record("lead-1", **VALID)  # 不传 value_provided
+    ok_blank, issues_blank, blank_item = service.record(
+        "lead-1", **{**VALID, "conclusion": "客户没回"}, value_provided="   "
+    )
+
+    assert (ok, issues) == (True, [])
+    assert (ok_blank, issues_blank) == (True, [])
+    assert item is not None and item.value_provided == ""
+    assert blank_item is not None and blank_item.value_provided == ""
+    # 两条都落了库：空值不是「没记录」，是「记录了但没给价值」
+    assert [item.value_provided for item in service.list_for("lead-1")] == ["", ""]

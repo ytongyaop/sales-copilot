@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS followups (
     conclusion TEXT NOT NULL,
     objection TEXT NOT NULL,
     next_followup_at TEXT NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    value_provided TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS raw_items (
     id TEXT PRIMARY KEY,
@@ -162,7 +163,9 @@ _SELECT_LEAD = (
 )
 _SELECT_EVENT = "SELECT id, lead_id, from_stage, to_stage, at FROM stage_history"
 _SELECT_ASSIGNMENT = "SELECT id, lead_id, from_owner, to_owner, reason, at FROM assignment_events"
-_SELECT_FOLLOWUP = "SELECT id, lead_id, conclusion, objection, next_followup_at, at FROM followups"
+_SELECT_FOLLOWUP = (
+    "SELECT id, lead_id, conclusion, objection, next_followup_at, at, value_provided FROM followups"
+)
 _SELECT_RAW = "SELECT id, lead_id, source, content, content_hash, at FROM raw_items"
 _SELECT_FACT = (
     "SELECT id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at,"
@@ -201,6 +204,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "sorting_batches", "dropped_json", "TEXT NOT NULL DEFAULT '[]'")
     # 归属候选落库：列表之外的单条视图要能回看「当时系统觉得像谁」。
     _ensure_column(conn, "sorting_batches", "candidates_json", "TEXT NOT NULL DEFAULT '[]'")
+    # T007：跟进要能标记「本次提供的价值」（空串 = 无价值跟进），旧库在这里补列。
+    _ensure_column(conn, "followups", "value_provided", "TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -380,8 +385,8 @@ class SqliteFollowupRepository(_SqliteRepository):
         with self._open() as conn:
             conn.execute(
                 "INSERT INTO followups "
-                "(id, lead_id, conclusion, objection, next_followup_at, at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, lead_id, conclusion, objection, next_followup_at, at, value_provided) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     item.id,
                     item.lead_id,
@@ -389,6 +394,7 @@ class SqliteFollowupRepository(_SqliteRepository):
                     item.objection,
                     item.next_followup_at,
                     item.at,
+                    item.value_provided,
                 ),
             )
 
@@ -407,6 +413,7 @@ class SqliteFollowupRepository(_SqliteRepository):
                 objection=row["objection"],
                 next_followup_at=row["next_followup_at"],
                 at=row["at"],
+                value_provided=row["value_provided"] or "",
             )
             for row in rows
         ]

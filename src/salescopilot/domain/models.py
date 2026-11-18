@@ -105,7 +105,11 @@ class StageEvent:
 
 @dataclass(frozen=True)
 class Followup:
-    """一条跟进留痕：三要素（结论 / 异议 / 下次跟进时间）＋ 写入时间。"""
+    """一条跟进留痕：三要素（结论 / 异议 / 下次跟进时间）＋ 写入时间 ＋ 本次提供的价值。
+
+    `value_provided` 允许空串：空 = 这次跟进没给客户新东西（显式标记为「无价值跟进」），
+    周复盘据此统计「有多少次跟进是空转」；不是「没记录」，所以不拒绝空值。
+    """
 
     id: str
     lead_id: str
@@ -113,6 +117,7 @@ class Followup:
     objection: str
     next_followup_at: str
     at: str
+    value_provided: str = ""
 
 
 @dataclass(frozen=True)

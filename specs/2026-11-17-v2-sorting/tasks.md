@@ -59,11 +59,12 @@
 
 ## 阶段 C：待办与复盘（S4–S5）
 
-- [ ] **[T007] 今日待办 + "本次提供的价值"** 🔒（schema）
+- [x] **[T007] 今日待办 + "本次提供的价值"** 🔒（schema）
   - 目标：`GET /todo` 按 A/B/C → 超时 → 缺项排序，每家最多一条，同分取最久未联系；每条带建议动作 + 价值点，无价值点不出现；跟进可标记"无价值跟进"。
   - 涉及文件：`src/salescopilot/adapters/db/sqlite.py`、`src/salescopilot/domain/models.py`、`src/salescopilot/domain/rules.py`（只加一条标记规则，三要素校验不动）、`src/salescopilot/services/followup.py`、`src/salescopilot/services/todo.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`tests/test_todo_service.py`（新建）、`tests/test_followup_service.py`（改）
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_todo_service.py tests\test_followup_service.py` ＋ 全量 `pytest -q`；`GET /todo` 返回每条 `value` 非空、`lead_id` 不重复
   - 预估：6h　依赖：T005、T006
+  - 实际：新增 `domain/todo.py`（纯规则）+ `services/todo.py`（编排）+ `tests/test_todo_domain.py` / `test_todo_api.py`；三份模板加 `todo:` 段（`values` 四块文案 + `max_items` + `week_days`，阈值全部来自模板，代码不写死数字）；`followups.value_provided` 走幂等补列，空值即"无价值跟进"；顺带删掉 `domain/sorting.py` 的死代码 `grade_from_elements` 并把 PRD 的分级表述改成"规则主算"（对齐 ADR-0008）
 
 - [ ] **[T008] 周复盘 + 3 个校准问题**
   - 目标：`GET /review` 汇总本周推进 / 卡点 / 分级变动 / 无价值跟进数，并接受 3 个校准问题作答写入 `preference_samples`。

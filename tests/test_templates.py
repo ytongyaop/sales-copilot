@@ -179,3 +179,89 @@ def test_grading_default_mode_must_be_known() -> None:
     issues = validate_template(_with_grading(template, default_mode="silent"))
 
     assert any(issue.location == "grading.default_mode" for issue in issues), issues
+
+
+# -------------------------------------------------------- 待办段（T007）
+
+
+def _with_todo(template: dict, **patch: object) -> dict:
+    """复制一份模板，只替换 `todo` 段里的指定键（其余保持原样）。"""
+    todo = {**template["todo"], **patch}
+    return {**template, "todo": todo}
+
+
+def test_all_templates_declare_todo_section() -> None:
+    """三份模板都带完整的 `todo` 段：四块价值文案非空、上限与一周窗口是正整数。"""
+    for name, template in _load().items():
+        todo = template["todo"]
+        assert set(todo["values"]) == {"basic", "needs", "decision", "followup"}, name
+        assert all(text.strip() for text in todo["values"].values()), name
+        assert isinstance(todo["max_items"], int) and todo["max_items"] > 0, name
+        assert isinstance(todo["week_days"], int) and todo["week_days"] > 0, name
+
+
+def test_todo_value_key_missing_is_reported() -> None:
+    """少一块价值文案 → 报 `todo.values.<分区>`，并点名缺的是哪一块。"""
+    template = _load()["edu_training"]
+    values = dict(template["todo"]["values"])
+    del values["decision"]
+
+    issues = validate_template(_with_todo(template, values=values))
+
+    assert any(
+        issue.location == "todo.values.decision" and "缺少价值文案" in issue.message
+        for issue in issues
+    ), issues
+
+
+def test_todo_value_blank_is_reported() -> None:
+    """价值文案是空白 → 报同一位置（待办不允许空价值）。"""
+    template = _load()["edu_training"]
+    values = {**template["todo"]["values"], "needs": "   "}
+
+    issues = validate_template(_with_todo(template, values=values))
+
+    assert any(
+        issue.location == "todo.values.needs" and "非空字符串" in issue.message for issue in issues
+    ), issues
+
+
+def test_todo_unknown_value_section_is_reported() -> None:
+    """多出一块不认识的分区 → 报 `todo.values.<键>`（多半是把分区名打错了）。"""
+    template = _load()["edu_training"]
+    values = {**template["todo"]["values"], "summary": "总结"}
+
+    issues = validate_template(_with_todo(template, values=values))
+
+    assert any(
+        issue.location == "todo.values.summary" and "未知的价值分区" in issue.message
+        for issue in issues
+    ), issues
+
+
+def test_todo_max_items_must_be_positive_int() -> None:
+    """`max_items` 只认正整数：0 与字符串都报错（不能靠布尔式真假混过去）。"""
+    template = _load()["edu_training"]
+
+    for bad in (0, -5, "20", True):
+        issues = validate_template(_with_todo(template, max_items=bad))
+        assert any(issue.location == "todo.max_items" for issue in issues), (bad, issues)
+
+
+def test_todo_week_days_is_optional_but_positive_when_present() -> None:
+    """`week_days` 可以不写（就没有「一周内」档）；写了必须正整数。"""
+    template = _load()["edu_training"]
+    todo = {key: value for key, value in template["todo"].items() if key != "week_days"}
+
+    assert validate_template({**template, "todo": todo}) == []
+
+    issues = validate_template(_with_todo(template, week_days=0))
+    assert any(issue.location == "todo.week_days" for issue in issues), issues
+
+
+def test_template_without_todo_section_is_still_valid() -> None:
+    """没有 `todo` 段的老模板照样合法：只是不出今日待办，不算坏模板。"""
+    template = _load()["edu_training"]
+    data = {key: value for key, value in template.items() if key != "todo"}
+
+    assert validate_template(data) == []

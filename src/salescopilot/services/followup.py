@@ -33,8 +33,13 @@ class FollowupService:
         conclusion: str,
         objection: str,
         next_followup_at: str,
+        value_provided: str = "",
     ) -> tuple[bool, list[ValidationIssue], Followup | None]:
-        """记录一条跟进；三要素缺失或非法时返回问题，不落库。"""
+        """记录一条跟进；三要素缺失或非法时返回问题，不落库。
+
+        `value_provided` 是「这次给了客户什么」，**允许为空**：空串就是显式标记
+        「无价值跟进」，供周复盘统计空转次数，所以这里不校验、不拒绝。
+        """
         lead = self._leads.get(lead_id)
         if lead is None:
             return False, [ValidationIssue("lead_id", "线索不存在")], None
@@ -54,6 +59,7 @@ class FollowupService:
             objection=objection.strip(),
             next_followup_at=next_followup_at.strip(),
             at=self._clock(),
+            value_provided=value_provided.strip() if isinstance(value_provided, str) else "",
         )
         self._followups.add(item)
         return True, [], item

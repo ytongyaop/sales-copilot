@@ -337,7 +337,70 @@ def validate_template(data: dict, blocks: dict[str, Block] = BLOCKS) -> list[Val
     if "card" in data:
         issues.extend(_check_card(data.get("card")))
     issues.extend(_check_grading(data.get("grading")))
+    # `todo` 段不是硬性要求（老模板没有照样能跑，只是不出待办），有就按口径校验。
+    if "todo" in data:
+        issues.extend(_check_todo(data.get("todo")))
     return issues
+
+
+def _check_todo(todo: object) -> list[ValidationIssue]:
+    """校验模板的 `todo` 段：四块价值文案齐全且非空、`max_items` 是正整数。
+
+    为什么这么严：待办条目**不允许空价值**，所以四块的文案必须先在模板里备齐；
+    `max_items` 决定一次看几条，0 或负数会让接口永远空着，必须当场报出来。
+    `week_days`（「一周内」的窗口天数）可选：写了就要是正整数，没写就不出 `week` 档，
+    代码里不留兜底数字。
+    位置写成 `todo.values.<分区>` / `todo.max_items`，上层可直接指到哪一项坏了。
+    """
+    if not isinstance(todo, dict):
+        return [ValidationIssue("todo", "todo 必须是映射（values / max_items）")]
+
+    issues: list[ValidationIssue] = []
+
+    values = todo.get("values")
+    if not isinstance(values, dict):
+        issues.append(ValidationIssue("todo.values", "values 必须是映射（分区 -> 提供的价值）"))
+    else:
+        for key in CARD_SECTIONS:
+            location = f"todo.values.{key}"
+            if key not in values:
+                issues.append(ValidationIssue(location, f"缺少价值文案：{key}"))
+                continue
+            text = values[key]
+            if not isinstance(text, str) or not text.strip():
+                issues.append(
+                    ValidationIssue(
+                        location, f"{key} 的价值文案必须是非空字符串（实际是 {text!r}）"
+                    )
+                )
+        extra = [key for key in values if key not in CARD_SECTIONS]
+        if extra:
+            allowed = "、".join(CARD_SECTIONS)
+            issues.append(
+                ValidationIssue(
+                    f"todo.values.{extra[0]}",
+                    f"未知的价值分区「{extra[0]}」：只允许 {allowed}",
+                )
+            )
+
+    issues.extend(_check_positive_int(todo, "max_items", required=True))
+    issues.extend(_check_positive_int(todo, "week_days", required=False))
+    return issues
+
+
+def _check_positive_int(todo: dict, key: str, *, required: bool) -> list[ValidationIssue]:
+    """`todo` 段里的正整数参数：`max_items` 必填，`week_days` 选填；缺必填项才报错。"""
+    location = f"todo.{key}"
+    if key not in todo:
+        if not required:
+            return []
+        return [ValidationIssue(location, f"缺少参数：{key}")]
+    value = todo[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        return [ValidationIssue(location, f"{key} 必须是正整数，实际是 {value!r}")]
+    if value <= 0:
+        return [ValidationIssue(location, f"{key} 必须是正整数，实际是 {value!r}")]
+    return []
 
 
 def _check_grading(grading: object) -> list[ValidationIssue]:

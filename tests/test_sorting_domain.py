@@ -1,4 +1,4 @@
-"""分拣单的纯规则测试：要素校验（含诊断消息）、出库建议的两个分支、分级兜底。
+"""分拣单的纯规则测试：要素校验（含诊断消息）、出库建议的两个分支。
 
 纯规则，不联网、不落库；每条断言都对应 `domain/sorting.py` 的一条判据。
 """
@@ -7,7 +7,6 @@ from salescopilot.domain.models import CARD_SECTIONS
 from salescopilot.domain.sorting import (
     ElementHit,
     build_next_action,
-    grade_from_elements,
     split_diagnostic,
     validate_elements,
 )
@@ -128,14 +127,3 @@ def test_next_action_is_empty_when_nothing_is_usable() -> None:
     action = build_next_action([], list(CARD_SECTIONS))
 
     assert action == {"action": "", "value_offered": "", "due_hint": ""}
-
-
-def test_grade_from_elements_covers_a_b_c() -> None:
-    """分级兜底只看要素覆盖：需求 + 决策 → A；只有需求 → B；其余 → C。"""
-    assert grade_from_elements([_hit("needs"), _hit("decision", "decision_maker")])["value"] == "A"
-    assert grade_from_elements([_hit("needs")])["value"] == "B"
-    assert (
-        grade_from_elements([_hit("basic", "company", "华远建设", "华远建设有限公司")])["value"]
-        == "C"
-    )
-    assert grade_from_elements([])["value"] == "C"

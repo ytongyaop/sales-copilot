@@ -253,27 +253,6 @@ def build_next_action(elements: list[ElementHit], missing_sections: list[str]) -
     }
 
 
-def grade_from_elements(elements: list[ElementHit]) -> dict:
-    """模型分级不可用时的兜底规则：按已过出处校验的要素覆盖度给 A/B/C。
-
-    只认块，不认行业：需求块 + 决策块都有 → A；只有需求块 → B；其余 → C。
-    依据（`basis`）取已过关要素的原文片段，保证引用都能定位。
-    """
-    sections = {element.card_section for element in elements}
-    if "needs" in sections and "decision" in sections:
-        value, reason = "A", "需求与决策两块都有原文依据"
-    elif "needs" in sections:
-        value, reason = "B", "只有需求依据，决策链还没落实"
-    else:
-        value, reason = "C", "要素太少，先把基础信息补齐"
-
-    return {
-        "value": value,
-        "reason": reason,
-        "basis": [element.source_span for element in elements[:2]],
-    }
-
-
 def contact_tokens(text: str) -> set[str]:
     """抽出可与联系方式比对的精确键：手机号、邮箱、8 位以上数字串（统一小写）。
 

@@ -33,6 +33,7 @@ from salescopilot.domain.models import (
 from salescopilot.domain.reminders import Reminder
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.domain.sorting import SortingSuggestion
+from salescopilot.domain.todo import TodoItem
 from salescopilot.entrypoints.bootstrap import (
     build_assignment_service,
     build_card_service,
@@ -47,6 +48,7 @@ from salescopilot.entrypoints.bootstrap import (
     build_reclaim_service,
     build_reminder_service,
     build_sorting_service,
+    build_todo_service,
     check_live_config,
     mode_info,
     templates,
@@ -63,6 +65,7 @@ from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
 from salescopilot.services.sorting import SortingService
+from salescopilot.services.todo import TodoService
 
 app = FastAPI(title="SalesCopilot", version="0.1.0")
 
@@ -117,11 +120,15 @@ class LeadFieldsIn(BaseModel):
 
 
 class FollowupIn(BaseModel):
-    """POST /leads/{id}/followups 的请求体：跟进三要素。"""
+    """POST /leads/{id}/followups 的请求体：跟进三要素 ＋ 可选的「本次提供的价值」。
+
+    `value_provided` 不填就是空串（显式标记「无价值跟进」），不当作缺字段报 422。
+    """
 
     conclusion: str
     objection: str
     next_followup_at: str
+    value_provided: str = ""
 
 
 class RawIn(BaseModel):
@@ -256,6 +263,10 @@ def get_grading_service() -> Iterator[GradingService]:
     yield build_grading_service()
 
 
+def get_todo_service() -> Iterator[TodoService]:
+    yield build_todo_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -269,6 +280,7 @@ ImportDep = Annotated[ImportService, Depends(get_import_service)]
 SortingDep = Annotated[SortingService, Depends(get_sorting_service)]
 CardDep = Annotated[CardService, Depends(get_card_service)]
 GradingDep = Annotated[GradingService, Depends(get_grading_service)]
+TodoDep = Annotated[TodoService, Depends(get_todo_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -311,6 +323,7 @@ def _followup_body(item: Followup) -> dict:
         "conclusion": item.conclusion,
         "objection": item.objection,
         "next_followup_at": item.next_followup_at,
+        "value_provided": item.value_provided,
         "at": item.at,
     }
 
@@ -458,6 +471,24 @@ def _grading_record_body(record: GradingRecord) -> dict:
         "human_value": record.human_value,
         "reason": record.reason,
         "actor": record.actor,
+    }
+
+
+def _todo_body(item: TodoItem) -> dict:
+    """一条待办：排序说明（`priority` / `due_kind`）+ 为什么跟 + 做什么 + 给什么。
+
+    字段与 `domain/todo.py` 的 `TodoItem` 一一对应，不做改名——前端只需要认一套词。
+    """
+    return {
+        "lead_id": item.lead_id,
+        "lead_name": item.lead_name,
+        "grade": item.grade,
+        "priority": item.priority,
+        "due_kind": item.due_kind,
+        "reason": item.reason,
+        "action": item.action,
+        "value_offered": item.value_offered,
+        "missing": list(item.missing),
     }
 
 
@@ -664,12 +695,13 @@ def advance_lead(lead_id: str, payload: AdvanceIn, service: FlowDep):
 
 @app.post("/leads/{lead_id}/followups", status_code=201)
 def create_followup(lead_id: str, payload: FollowupIn, service: FollowupDep):
-    """记录跟进：成功 201 返回留痕；三要素不合法 422，线索不存在 404。"""
+    """记录跟进：成功 201 返回留痕（含 `value_provided`）；三要素不合法 422，线索不存在 404。"""
     ok, issues, item = service.record(
         lead_id,
         conclusion=payload.conclusion,
         objection=payload.objection,
         next_followup_at=payload.next_followup_at,
+        value_provided=payload.value_provided,
     )
     if not ok or item is None:
         missing_lead = any(issue.location == "lead_id" for issue in issues)
@@ -811,6 +843,19 @@ def list_grading_history(lead_id: str, service: GradingDep):
     if issues:
         return JSONResponse(status_code=404, content=_issue_body(issues))
     return rows
+
+
+# ---------------------------------------------------------------- 今日待办
+
+
+@app.get("/todo")
+def list_todo(service: TodoDep) -> list[dict]:
+    """今日待办：分级 → 到期 → 缺项 → 最久未联系四层排序，每家最多一条。
+
+    每条都带建议动作与价值点（`value_offered` 一定非空，取不到价值的客户不出现）；
+    线索为空时返回 `[]`，不返回 204、也不编一条占位。
+    """
+    return [_todo_body(item) for item in service.list()]
 
 
 @app.patch("/leads/{lead_id}/facts/{field}")

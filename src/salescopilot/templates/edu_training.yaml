@@ -14,6 +14,16 @@ grading:
     a_min: 0.75
     b_min: 0.45
   default_mode: propose        # propose（先提议后确认）| auto（直接采纳）
+# 今日待办（T007）：排序上限与「给什么价值」的候选文案。
+# week_days 是「一周内」这一档的窗口天数：只在这里配置，代码里不写死数字。
+todo:
+  values:
+    basic: 公司背景资料
+    needs: 同类客户案例
+    decision: 方案与报价区间说明
+    followup: 上次承诺的跟进
+  week_days: 7
+  max_items: 20
 flow:
   - block: intake
   - block: first_contact
