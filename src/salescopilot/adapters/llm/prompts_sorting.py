@@ -14,7 +14,8 @@ from salescopilot.domain.matching import Candidate
 
 # v2：加入「今天日期」与「时间字段必须 ISO 日期」两条约束（相对日期「下周三」→ 具体日期）。
 # v3：讲清 `value_offered` 是「给对方的东西」（资料/案例/方案/测评），不能是日期、金额、客户名。
-SORTING_PROMPT_VERSION = "v3"
+# v4：`value_offered` 改由系统按模板填，模型可留空（它写的那份只留作对照，不进建议）。
+SORTING_PROMPT_VERSION = "v4"
 
 # 星期几的中文名：只用来把「今天」讲清楚，模型据此把「下周三」换算成具体日期。
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -24,7 +25,7 @@ SORTING_SYSTEM_PROMPT = """你是销售流程里的分拣员，只负责把一�
 输出要求（只输出一个 JSON 对象，不要解释文字，不要 Markdown 代码块）：
 {"elements":[{"card_section":"basic|needs|decision|followup","field":"字段名","value":"取值","source_span":"原文逐字片段","confidence":0.0}],
  "grading":{"value":"A|B|C","reason":"分级理由","basis":["原文逐字片段"]},
- "next_action":{"action":"下一步动作","value_offered":"这次能给对方什么","due_hint":"时间线索"}}
+ "next_action":{"action":"下一步动作","value_offered":"可留空（系统按模板填）","due_hint":"时间线索"}}
 
 硬约束，按顺序检查：
 1. `source_span` 必须是原文里**逐字出现**的片段（不要改写、不要补主语、不要翻译），
@@ -35,10 +36,10 @@ SORTING_SYSTEM_PROMPT = """你是销售流程里的分拣员，只负责把一�
    不要自造业务叫法；`value` 是这条要素的结论，`source_span` 是支撑它的话。
 4. `confidence` 是 0 到 1 之间的小数。
 5. `grading.value` 只能是 A / B / C；`basis` 里每条也必须能在原文里逐字找到。
-6. `next_action.action` 必须具体（下一次做什么）；`value_offered` 是**我们准备提供给客户的
-   具体东西**（资料 / 案例 / 方案 / 测评 / 报价区间说明这类），**不能是日期、金额、客户名**
-   ——时间是 `due_hint` 的事，钱与名字都不是「给的东西」；原文里没有可给的东西就写
-   `"value_offered": ""`。时间线索能确定就写进 `due_hint`，不确定就留空字符串。
+6. `next_action.action` 必须具体（下一次做什么）；`value_offered` **可以留空字符串**——这一格
+   由系统按客户模板的规则填写，不需要你来挑。确实想提示时，只写我们准备提供给客户的
+   具体东西（资料 / 案例 / 方案 / 测评），**不能是日期、金额、客户名**：时间是 `due_hint`
+   的事，钱与名字都不是「给的东西」。时间线索能确定就写进 `due_hint`，不确定就留空字符串。
 7. 原文里没有的信息一律不写；不确定就少给，不要凑数。
 8. 时间类字段（`appointment_at`，以及模板里 label 含「时间」「日期」的字段）的 `value`
    必须是 `YYYY-MM-DD`：把「下周三」「明天」这类说法按开头给的今天日期换算成具体日期；

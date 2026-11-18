@@ -1,6 +1,7 @@
-"""分拣单的纯规则测试：要素校验（含诊断消息）、出库建议的两个分支。
+"""分拣单的纯规则测试：要素校验（含诊断消息）、出库建议的三个分支。
 
 纯规则，不联网、不落库；每条断言都对应 `domain/sorting.py` 的一条判据。
+「给什么」（`value_offered`）只认模板文案，模型写的那份只做对照（`model_value_offered`）。
 """
 
 from salescopilot.domain.models import CARD_SECTIONS
@@ -98,13 +99,15 @@ def test_non_dict_element_is_reported_not_raised() -> None:
 
 
 def test_next_action_prefers_the_first_missing_section() -> None:
-    """有缺项时动作指向最先缺的那一块，并且必须给出「手上已有的价值」。"""
+    """有缺项时动作指向最先缺的那一块；「给什么」取模板里该分区的文案。"""
     elements = [_hit(section="needs", field="need", value="预算三十万")]
 
-    action = build_next_action(elements, ["basic", "decision", "followup"])
+    action = build_next_action(
+        elements, ["basic", "decision", "followup"], fallback_values={"basic": "公司背景资料"}
+    )
 
     assert "基础信息" in action["action"]
-    assert action["value_offered"] == "预算三十万"
+    assert action["value_offered"] == "公司背景资料"
     assert action["due_hint"] == ""
 
 
@@ -115,61 +118,68 @@ def test_next_action_falls_back_to_the_latest_appointment() -> None:
         _hit(section="followup", field="appointment_at", value="下周一", span="下周一下午再聊"),
     ]
 
-    action = build_next_action(elements, [])
+    action = build_next_action(elements, [], fallback_values={"followup": "上次承诺的跟进"})
 
     assert action["due_hint"] == "下周一"
-    assert action["value_offered"] == "下周一"
+    assert action["value_offered"] == "上次承诺的跟进"
     assert "约定时间" in action["action"]
 
 
 def test_next_action_is_empty_when_nothing_is_usable() -> None:
-    """一条要素都没有时 `action` 为空，由用例层拒绝生成分拣单。"""
-    action = build_next_action([], list(CARD_SECTIONS))
+    """一条要素都没有时 `action` 与 `value_offered` 为空，由用例层拒绝生成分拣单。"""
+    action = build_next_action([], list(CARD_SECTIONS), fallback_values={"basic": "公司背景资料"})
 
-    assert action == {"action": "", "value_offered": "", "due_hint": ""}
+    assert action == {
+        "action": "",
+        "value_offered": "",
+        "due_hint": "",
+        "model_value_offered": "",
+    }
 
 
-def test_next_action_drops_a_date_value_offered_and_uses_the_template() -> None:
-    """`value_offered` 是日期（ISO）时退回模板文案：时间是 `due_hint` 的事，不是「给的东西」。
+def test_model_value_offered_is_kept_verbatim_and_never_used() -> None:
+    """模型把「给什么」填成客户名（真模型实测）：规则值照旧取模板，模型原值只留作对照。
 
-    反证的是真模型产出：`value_offered = "2026-11-25"` 落库后，人看到的「提供什么」
-    变成一串日期。这里模板给了文案就换文案，`due_hint` 仍保留那个日期。
+    反证的是真模型产出：`value_offered = "王总（华远建设集团，最终签批人）"`。
+    「给客户什么」不能由模型挑——它会把客户名、金额、时间一起挑进来。
     """
-    elements = [
-        _hit(section="needs", field="need", value="材料台账要对得上"),
-        _hit(section="followup", field="appointment_at", value="2026-11-25"),
-    ]
+    elements = [_hit(section="followup", field="appointment_at", value="2026-11-25")]
+    model_text = "王总（华远建设集团，最终签批人）"
 
     action = build_next_action(
-        elements, [], fallback_values={"followup": "上次承诺的跟进", "basic": "公司背景资料"}
+        elements,
+        [],
+        fallback_values={"followup": "上次承诺的跟进"},
+        model_value_offered=model_text,
     )
 
     assert action["value_offered"] == "上次承诺的跟进"
+    assert action["model_value_offered"] == model_text
+    assert model_text not in action["value_offered"]
     assert action["due_hint"] == "2026-11-25"
-    assert "2026-11-25" not in action["value_offered"]
 
 
-def test_next_action_leaves_value_offered_empty_when_the_template_has_none() -> None:
-    """模板没有文案时置空（宁可不显示，也不把日期当「给的东西」）。"""
+def test_value_offered_is_empty_when_the_template_has_no_such_section() -> None:
+    """模板缺该分区（或整个没装配）时 `value_offered` 为空：不拿要素值、不拿日期凑。"""
     elements = [_hit(section="followup", field="appointment_at", value="2026-11-25")]
 
-    action = build_next_action(elements, [], fallback_values=None)
+    for fallback in (None, {}, {"basic": "公司背景资料"}):
+        action = build_next_action(elements, [], fallback_values=fallback)
 
-    assert action["value_offered"] == ""
-    assert action["due_hint"] == "2026-11-25"
-    assert action["action"], "动作仍要说清（只是不再拿日期冒充价值）"
+        assert action["value_offered"] == ""
+        assert action["model_value_offered"] == ""
+        assert action["due_hint"] == "2026-11-25"
+        assert action["action"], "动作仍要说清（只是不再拿别的值冒充价值）"
 
 
-def test_next_action_keeps_a_real_offer_and_drops_a_pure_number() -> None:
-    """正常文案原样保留；纯数字（金额 / 电话号码）同样不算「给的东西」。"""
-    kept = build_next_action([_hit(section="needs", field="need", value="同类项目案例")], ["basic"])
+def test_element_values_are_never_used_as_the_offer() -> None:
+    """要素里明明有一条像「给的东西」的文案，也不采用：规则优先，只认模板。"""
+    elements = [_hit(section="needs", field="need", value="同类项目案例")]
 
-    assert kept["value_offered"] == "同类项目案例"
-
-    replaced = build_next_action(
-        [_hit(section="needs", field="need", value="13800001111")],
-        ["basic"],
-        fallback_values={"basic": "公司背景资料"},
+    with_template = build_next_action(
+        elements, ["basic"], fallback_values={"basic": "公司背景资料"}
     )
+    assert with_template["value_offered"] == "公司背景资料"
 
-    assert replaced["value_offered"] == "公司背景资料"
+    without_template = build_next_action(elements, ["basic"])
+    assert without_template["value_offered"] == "", "模板没有就留空，不退回要素值"

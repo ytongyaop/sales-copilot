@@ -320,15 +320,14 @@ class SortingService:
         grading = self._grade(elements, resolved_id)
 
         # 6) 出库建议：按缺项规则重算；没有任何可用依据就拒绝生成（不落一张空单）。
-        #    `value_offered` 只收「给对方的东西」：模型/要素给的是日期或数字时，
-        #    `build_next_action` 会退回该客户模板 `todo.values` 里的文案（口径同今日待办）。
-        missing = [
-            section
-            for section in CARD_SECTIONS
-            if not any(element.card_section == section for element in elements)
-        ]
+        #    「这次给什么」只认模板 `todo.values`（分区口径同今日待办）；模型写的那一份
+        #    原样放进 `model_value_offered` 供对照，不参与判断——真模型实测会把它填成
+        #    客户名（「王总（华远建设集团，最终签批人）」）。
         next_action = build_next_action(
-            elements, missing, fallback_values=self._todo_values(resolved_id)
+            elements,
+            _missing_sections(elements),
+            fallback_values=self._todo_values(resolved_id),
+            model_value_offered=_model_value_offered(result.payload),
         )
         if not next_action.get("action"):
             return SortingOutcome(
@@ -906,21 +905,26 @@ class SortingService:
     def _suggestion_view(self, batch: SortingBatch) -> dict:
         """单条视图里的 `suggestion`：键与 `POST /sorting` 完全对齐（同一套词，前端只认一遍）。
 
-        - `elements` / `next_action`：模型原文里的那两份（本增量不改这两块的口径）；
+        - `elements` / `model_grading`：模型原文里的那两份；
         - `grading`：按规则现算，与投料时同一份要素、同一个函数；
         - `grading_source`：恒为 `rule`，标明这张单的档位来源；
-        - `model_grading`：模型原文里那份，形状不对就是 null（不编一份假的）。
+        - `next_action`：按缺项规则**现在重算**（`value_offered` 取模板），模型写的那份
+          `value_offered` 放进 `model_value_offered`——前端展示的是规则值，模型值只作附注。
         """
         payload = _loads(batch.suggestion_json) or {}
         elements, _skipped = self._validated_elements(batch, batch.lead_id)
         raw_elements = payload.get("elements")
-        raw_next = payload.get("next_action")
         return {
             "elements": raw_elements if isinstance(raw_elements, list) else [],
             "grading": self._grade(elements, batch.lead_id),
             "grading_source": GRADING_SOURCE_RULE,
             "model_grading": _model_grading(payload),
-            "next_action": raw_next if isinstance(raw_next, dict) else {},
+            "next_action": build_next_action(
+                elements,
+                _missing_sections(elements),
+                fallback_values=self._todo_values(batch.lead_id),
+                model_value_offered=_model_value_offered(payload),
+            ),
         }
 
 
@@ -1048,6 +1052,26 @@ def _model_grading(payload: dict | None) -> dict | None:
     """
     grading = payload.get("grading") if isinstance(payload, dict) else None
     return grading if isinstance(grading, dict) else None
+
+
+def _model_value_offered(payload: dict | None) -> str:
+    """模型原文里的 `next_action.value_offered`：只做形状兜底（非字符串收成空串），内容不改。
+
+    这一格不进建议，只作对照展示：模型挑「给什么」必然挑成客户名或金额，
+    规则那一份才是给客户看的那句话。
+    """
+    next_action = payload.get("next_action") if isinstance(payload, dict) else None
+    raw = next_action.get("value_offered") if isinstance(next_action, dict) else None
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _missing_sections(elements: list[ElementHit]) -> list[str]:
+    """四块里一条要素都没有的分区（按 `CARD_SECTIONS` 的顺序，第一个就是「最先缺」）。"""
+    return [
+        section
+        for section in CARD_SECTIONS
+        if not any(element.card_section == section for element in elements)
+    ]
 
 
 def _loads(text: str) -> dict | None:

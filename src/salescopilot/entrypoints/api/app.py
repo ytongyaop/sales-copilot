@@ -1103,6 +1103,8 @@ def _suggestion_body(
     与分拣单里的 `suggestion_json`（模型原文）刻意不同：这里是给人看的版本。
     `grading` 恒为规则算出的那一份（`grading_source` 标 `rule`），模型自报的那份放
     `model_grading` 供对比——两者可以不一样，前端不该拿去当同一个数（ADR-0008）。
+    `next_action.value_offered` 同理只认模板规则那一份，模型写的原值在
+    `next_action.model_value_offered`（可为空串，只供对照展示，不参与判断）。
     """
     if suggestion is None:
         return None

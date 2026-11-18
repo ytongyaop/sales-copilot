@@ -9,7 +9,7 @@
 5. 原文只有简称（「华远」）、原文里的名字没有后缀时也判不出精确键，照旧走模糊；
 6. 字符串只到复核区 → 进待认领池，`lead_id` 为空；
 7. 编造的出处被丢弃（`dropped` 有记录、该要素不落建议），模型原文仍原样留痕；
-8. 出库建议的 `value_offered` 不许是日期（模型给的日期值退回模板文案）；
+8. 出库建议的 `value_offered` 只认模板文案（模型写的那份另存 `model_value_offered`）；
 9. 同一段原文重复投料不产生第二条原文（沿用采集的幂等口径）。
 """
 
@@ -323,10 +323,12 @@ def test_list_batches_reports_dropped_count(tmp_path: Path) -> None:
     assert counted == {outcome.batch.id: 1, "batch-broken": 0}
 
 
-def test_value_offered_is_never_a_date(tmp_path: Path) -> None:
-    """出库建议的「提供什么」不许是日期：落到模板 `todo.values` 的文案，日期留在 `due_hint`。
+def test_value_offered_comes_from_the_template_and_the_model_copy_is_kept(tmp_path: Path) -> None:
+    """出库建议的「提供什么」只认模板 `todo.values`；模型写的那份原样留在对照字段里。
 
-    反证的是真模型产出：`next_action.value_offered = "2026-11-25"`——时间占了「给什么」这一格。
+    反证的是真模型产出：`next_action.value_offered = "王总（华远建设集团，最终签批人）"`
+    或 `"2026-11-25"`——「给什么」一旦交给模型挑，客户名、时间、金额都会进来。
+    假模型这里给的是要素取值（`_sorting_next_action`），同样不会被采用。
     """
     service, _judge, _raws, _batches, lead = _service(tmp_path)
 
@@ -338,6 +340,10 @@ def test_value_offered_is_never_a_date(tmp_path: Path) -> None:
     assert next_action["due_hint"] == "2026-11-25", "约定时间仍要落在 due_hint 上"
     assert next_action["value_offered"] == template_value
     assert next_action["value_offered"] != next_action["due_hint"]
+    # 模型那份照原样带着（假模型给的是第一条要素的取值），只作对照，不参与判断。
+    assert "model_value_offered" in next_action
+    assert isinstance(next_action["model_value_offered"], str)
+    assert next_action["model_value_offered"] != template_value
 
 
 def test_repeated_content_reuses_the_same_raw(tmp_path: Path) -> None:

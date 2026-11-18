@@ -98,6 +98,14 @@ function statusLabel(status) {
   return STATUS_LABELS[status] || status
 }
 
+// 「给什么」由模板规则决定；模型写的那份只在**与规则值不同**时作灰字附注，不参与任何判断。
+function modelOfferNote(item) {
+  const next = (item && item.next_action) || {}
+  const model = (next.model_value_offered || '').trim()
+  if (!model) return false
+  return model !== (next.value_offered || '').trim()
+}
+
 // 待办行点一下 → 抛给外层打开客户详情。
 function openTodo(item) {
   emit('open-lead', item.lead_id)
@@ -531,6 +539,9 @@ watch(
           <p v-if="suggestion"><strong>{{ suggestion.next_action.action }}</strong></p>
           <p v-if="suggestion && suggestion.next_action.value_offered" class="muted">
             提供的价值：{{ suggestion.next_action.value_offered }}
+            <span v-if="modelOfferNote(suggestion)" class="model-note">
+              模型建议：{{ suggestion.next_action.model_value_offered }}
+            </span>
           </p>
         </section>
       </div>
@@ -859,6 +870,13 @@ watch(
 .quote {
   color: #8a939d;
   font-size: 13px;
+}
+
+.model-note {
+  display: block;
+  margin-top: 2px;
+  color: #a2aab3;
+  font-size: 12px;
 }
 
 .grading {

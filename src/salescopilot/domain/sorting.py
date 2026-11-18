@@ -4,8 +4,8 @@
 - 只做计算：入参是已取好的原文与候选，不查库、不读时钟、不发网络请求；
 - 要素能不能进分拣单由这里判，模型说什么不算数；
 - `source_span` 必须在原文里真正定位得到，否则该条要素丢弃并给出诊断（编号 + 原因）；
-- 出库建议按「先补缺项、再指向约定时间」的固定顺序算；模型给的那一份只留在原始 JSON
-  里供审计，不用它做决定。
+- 出库建议按「先补缺项、再指向约定时间」的固定顺序算；「这次给客户什么」一律取模板
+  `todo.values` 的文案，模型写的那一份只留作对照（`model_value_offered`），不用它做决定。
 
 行业叫法不出现在这里：本模块只认 `CARD_SECTIONS` 与通用字段名。
 """
@@ -55,15 +55,7 @@ _MAX_TRUNCATE = 10
 # 诊断消息的固定前缀：`elements[3]：原因`，上层据此把下标还原成 `dropped`。
 _DIAGNOSTIC = re.compile(r"^elements\[(\d+)\]：(.*)$")
 
-# `value_offered` 只能写「给对方的东西」：整串是日期（ISO / `11月25日`）或纯数字（含金额）
-# 的，都不是资料/案例/方案，按规则退回模板文案。
-# 相对时间说法（`下周一`）不在此列：它不是确定日期，也不冒充「给的东西」的具体日期，
-# 拦它反而会把原本可用的要素值一起丢掉。
-_OFFERED_DATE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
-_OFFERED_CN_DATE = re.compile(r"^\d{1,2}月\d{1,2}[日号]$")
-_OFFERED_NUMERIC = re.compile(r"^[\d\s.,:：+\-–—/%~～¥￥元块万wW年月日号]+$")
-
-# 没有缺项时 `value_offered` 退回哪一块的模板文案：与 `domain/todo.py` 同一口径
+# 没有缺项时 `value_offered` 取哪一块的模板文案：与 `domain/todo.py` 同一口径
 # （第一个缺项所在分区；一项不缺就取 followup），两处不再各写一套。
 OFFERED_FALLBACK_SECTION = "followup"
 
@@ -228,83 +220,70 @@ def build_next_action(
     missing_sections: list[str],
     *,
     fallback_values: dict[str, str] | None = None,
+    model_value_offered: str = "",
 ) -> dict:
     """按固定顺序给出库建议：先补缺项，没有缺项再指向最近一次约定的时间。
 
-    - `missing_sections` 非空：动作指向**最先缺**的那一块，`value_offered` 取该块里
-      置信度最高的一条要素（该块一条都没有时取全局最高），人一眼知道「补它之前手上
-      已经有什么」；
-    - 没有缺项：找最后一条时间类字段（`TIME_FIELDS`），`due_hint` 用它；`value_offered`
-      **不**再用那个时间（见下），改成模板文案；
-    - `value_offered` 只允许是「给对方的东西」（资料 / 案例 / 方案 / 测评）：命中的取值
-      是日期或纯数字（金额、电话号码都算）时一律丢弃，换成模板 `todo.values` 里对应分区
-      的文案（分区口径与 `domain/todo.py` 一致）；模板也没有就留空——留空比把日期塞进
-      「提供什么」这一格诚实，前端本来就不显示空建议；
-    - 一条要素都没有时 `action` 为空，由用例层拒绝生成（这一条不因 `fallback_values`
-      而放宽：没有要素的单子本来就没有可出库的依据）。
+    「这次给客户什么」**只认模板**，要素取值与模型的话都不参与：
+
+    - `value_offered` 取模板 `todo.values` 里对应分区的文案（分区口径与 `domain/todo.py`
+      一致）：有缺项时取**最先缺**那一块，一项不缺时取 `OFFERED_FALLBACK_SECTION`；
+      模板没有该分区就留空——留空比把日期、金额或客户名塞进「提供什么」这一格诚实，
+      前端本来就不显示空建议；
+    - `missing_sections` 非空：动作指向最先缺的那一块；
+    - 没有缺项：找最后一条时间类字段（`TIME_FIELDS`），`due_hint` 用它；
+    - 一条要素都没有时 `action` 与 `value_offered` 都为空，由用例层拒绝生成（这一条不因
+      `fallback_values` 而放宽：没有要素的单子本来就没有可出库的依据）。
+
+    `model_value_offered` 是模型自己写的那一份，**原样透传**（只把非字符串收成空串），
+    放在 `model_value_offered` 里供审计与对照展示，不参与任何判断——真模型实测会把它
+    填成客户名（「王总（华远建设集团，最终签批人）」），正是「让模型决定给什么」的
+    必然结果，所以这一格改由规则定。
 
     `fallback_values` 是模板 `todo.values`（分区 → 文案），由用例层按该客户的模板传入；
-    本函数不读模板、不猜文案。返回的字典三键恒在：`action` / `value_offered` / `due_hint`。
+    本函数不读模板、不猜文案。返回的字典四键恒在：`action` / `value_offered` /
+    `due_hint` / `model_value_offered`。
     """
+    offered_by_model = model_value_offered.strip() if isinstance(model_value_offered, str) else ""
+    if not elements:
+        return _next_action("", "", "", offered_by_model)
+
     missing = [section for section in missing_sections if section in CARD_SECTIONS]
     if missing:
         section = missing[0]
-        base = _best_value(elements, section)
-        if not base:
-            return {"action": "", "value_offered": "", "due_hint": ""}
-        return {
-            "action": f"补齐「{SECTION_LABELS.get(section, section)}」要素",
-            "value_offered": _offered_value(base, _fallback_value(fallback_values, section)),
-            "due_hint": "",
-        }
+        return _next_action(
+            f"补齐「{SECTION_LABELS.get(section, section)}」要素",
+            _fallback_value(fallback_values, section),
+            "",
+            offered_by_model,
+        )
 
     time_hits = [element for element in elements if element.field in TIME_FIELDS]
     if not time_hits:
-        base = _best_value(elements, None)
-        if not base:
-            return {"action": "", "value_offered": "", "due_hint": ""}
-        return {
-            "action": "确认下一次联系时间",
-            "value_offered": _offered_value(
-                base, _fallback_value(fallback_values, OFFERED_FALLBACK_SECTION)
-            ),
-            "due_hint": "",
-        }
+        return _next_action(
+            "确认下一次联系时间",
+            _fallback_value(fallback_values, OFFERED_FALLBACK_SECTION),
+            "",
+            offered_by_model,
+        )
 
     latest = time_hits[-1]
-    return {
-        "action": f"按约定时间（{latest.value}）跟进",
-        "value_offered": _offered_value(
-            latest.value, _fallback_value(fallback_values, OFFERED_FALLBACK_SECTION)
-        ),
-        "due_hint": latest.value,
-    }
-
-
-def _offered_value(raw: str, fallback: str) -> str:
-    """`value_offered` 的取值口径：能当「给的东西」就用原值，否则退回模板文案。
-
-    判据只看整串的形状（日期 / 纯数字），不做语义理解：模型把「2026-11-25」写进
-    「这次能给对方什么」时，任何语言模型都读得出那不是资料，规则同样读得出。
-    """
-    text = raw.strip() if isinstance(raw, str) else ""
-    if text and not looks_like_date_or_number(text):
-        return text
-    return fallback.strip() if isinstance(fallback, str) else ""
-
-
-def looks_like_date_or_number(value: str) -> bool:
-    """整串是不是日期（ISO / `11月25日`）或纯数字（含金额、电话号码）。
-
-    只判形状，不解析日期本身：`2026-13-45` 也算「日期形状」，因为它同样不能当
-    「给客户的东西」。空串返回 False（空是另一条规则：`action` 也空就不生成）。
-    """
-    text = value.strip() if isinstance(value, str) else ""
-    if not text:
-        return False
-    return bool(
-        _OFFERED_DATE.match(text) or _OFFERED_CN_DATE.match(text) or _OFFERED_NUMERIC.match(text)
+    return _next_action(
+        f"按约定时间（{latest.value}）跟进",
+        _fallback_value(fallback_values, OFFERED_FALLBACK_SECTION),
+        latest.value,
+        offered_by_model,
     )
+
+
+def _next_action(action: str, value_offered: str, due_hint: str, model_value_offered: str) -> dict:
+    """出库建议的固定形状：四个键恒在（前端与用例层只认这一套，不再各拼一份）。"""
+    return {
+        "action": action,
+        "value_offered": value_offered,
+        "due_hint": due_hint,
+        "model_value_offered": model_value_offered,
+    }
 
 
 def _fallback_value(values: dict[str, str] | None, section: str) -> str:
@@ -357,16 +336,6 @@ def _match_suffix(full: str) -> str:
         if full.endswith(suffix):
             return suffix
     return ""
-
-
-def _best_value(elements: list[ElementHit], section: str | None) -> str:
-    """取某一块里置信度最高的取值；该块没有要素时取全局最高；都没有时返回空串。"""
-    scoped = [element for element in elements if section is None or element.card_section == section]
-    if not scoped:
-        scoped = list(elements)
-    if not scoped:
-        return ""
-    return max(scoped, key=lambda element: element.confidence).value
 
 
 def _confidence(value: object) -> float:
