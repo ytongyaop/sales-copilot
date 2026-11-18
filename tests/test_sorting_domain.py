@@ -127,3 +127,49 @@ def test_next_action_is_empty_when_nothing_is_usable() -> None:
     action = build_next_action([], list(CARD_SECTIONS))
 
     assert action == {"action": "", "value_offered": "", "due_hint": ""}
+
+
+def test_next_action_drops_a_date_value_offered_and_uses_the_template() -> None:
+    """`value_offered` 是日期（ISO）时退回模板文案：时间是 `due_hint` 的事，不是「给的东西」。
+
+    反证的是真模型产出：`value_offered = "2026-11-25"` 落库后，人看到的「提供什么」
+    变成一串日期。这里模板给了文案就换文案，`due_hint` 仍保留那个日期。
+    """
+    elements = [
+        _hit(section="needs", field="need", value="材料台账要对得上"),
+        _hit(section="followup", field="appointment_at", value="2026-11-25"),
+    ]
+
+    action = build_next_action(
+        elements, [], fallback_values={"followup": "上次承诺的跟进", "basic": "公司背景资料"}
+    )
+
+    assert action["value_offered"] == "上次承诺的跟进"
+    assert action["due_hint"] == "2026-11-25"
+    assert "2026-11-25" not in action["value_offered"]
+
+
+def test_next_action_leaves_value_offered_empty_when_the_template_has_none() -> None:
+    """模板没有文案时置空（宁可不显示，也不把日期当「给的东西」）。"""
+    elements = [_hit(section="followup", field="appointment_at", value="2026-11-25")]
+
+    action = build_next_action(elements, [], fallback_values=None)
+
+    assert action["value_offered"] == ""
+    assert action["due_hint"] == "2026-11-25"
+    assert action["action"], "动作仍要说清（只是不再拿日期冒充价值）"
+
+
+def test_next_action_keeps_a_real_offer_and_drops_a_pure_number() -> None:
+    """正常文案原样保留；纯数字（金额 / 电话号码）同样不算「给的东西」。"""
+    kept = build_next_action([_hit(section="needs", field="need", value="同类项目案例")], ["basic"])
+
+    assert kept["value_offered"] == "同类项目案例"
+
+    replaced = build_next_action(
+        [_hit(section="needs", field="need", value="13800001111")],
+        ["basic"],
+        fallback_values={"basic": "公司背景资料"},
+    )
+
+    assert replaced["value_offered"] == "公司背景资料"

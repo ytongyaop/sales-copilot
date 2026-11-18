@@ -76,6 +76,7 @@ from salescopilot.domain.sorting import (
     validate_decision_reason,
     validate_elements,
 )
+from salescopilot.domain.todo import todo_spec
 from salescopilot.services.ingest import register_raw_item
 from salescopilot.services.leads import utc_now_iso
 
@@ -319,12 +320,16 @@ class SortingService:
         grading = self._grade(elements, resolved_id)
 
         # 6) 出库建议：按缺项规则重算；没有任何可用依据就拒绝生成（不落一张空单）。
+        #    `value_offered` 只收「给对方的东西」：模型/要素给的是日期或数字时，
+        #    `build_next_action` 会退回该客户模板 `todo.values` 里的文案（口径同今日待办）。
         missing = [
             section
             for section in CARD_SECTIONS
             if not any(element.card_section == section for element in elements)
         ]
-        next_action = build_next_action(elements, missing)
+        next_action = build_next_action(
+            elements, missing, fallback_values=self._todo_values(resolved_id)
+        )
         if not next_action.get("action"):
             return SortingOutcome(
                 None,
@@ -364,10 +369,16 @@ class SortingService:
 
         返回（判定, 候选列表, 归属 id）。只有 `auto` 才给归属 id；灰区与新客户都返回 None，
         由状态 `pending_claim` 表达「等认领」。
+
+        L0 的精确键有两类，都要求**完全相等**（ADR-0007）：
+        1. 联系方式（手机号 / 邮箱 / 8 位以上数字串）；
+        2. 规范化全称：原文里抽出的机构名与客户名 `normalize_org` 后完全一致。
+           「只差组织形式后缀」的一律不算命中（`suffix_only_difference`）：那是不同法人，
+           交给 L1 进复核，不自动合并。
         """
         leads = self._leads.list()
 
-        # L0：联系方式精确键（完全相等才算命中）。
+        # L0-a：联系方式精确键（完全相等才算命中）。
         tokens = contact_tokens(content)
         if tokens:
             for lead in leads:
@@ -382,8 +393,22 @@ class SortingService:
                     )
                     return decision, [candidate], lead.id
 
-        # L1：原文里的候选全称 vs 候选客户名字，取每个客户自己的最高分。
+        # 原文里的机构名候选：L0-b 与 L1 共用这一份（只抽一次，结论也就只有一套）。
         names = org_name_candidates(content)
+
+        # L0-b：规范化全称一致（后缀只差形态的除外）。
+        exact_lead = self._exact_name_hit(leads, names)
+        if exact_lead is not None:
+            candidate = Candidate(exact_lead.id, exact_lead.name, 100.0, "exact")
+            decision = MatchDecision(
+                band="auto",
+                scorer="exact",
+                score=100.0,
+                reason=f"精确键命中：规范化全称一致（{exact_lead.name}），不调模型复核",
+            )
+            return decision, [candidate], exact_lead.id
+
+        # L1：原文里的候选全称 vs 候选客户名字，取每个客户自己的最高分。
         scored: list[tuple[Candidate, str]] = []
         for lead in leads:
             core = normalized_org(lead.name, self._aliases)
@@ -412,6 +437,30 @@ class SortingService:
         )
         resolved = top.lead_id if (top is not None and decision.band == "auto") else None
         return decision, list(ranked), resolved
+
+    def _exact_name_hit(self, leads: list[Lead], names: list[str]) -> Lead | None:
+        """原文里的某个机构名与哪个客户「规范化后完全一致」；没有就返回 None。
+
+        三条限定，缺一条都不算精确命中：
+        1. 两边 `normalize_org`（含别名表）后完全相等 —— 不做模糊、不打分；
+        2. 排除 `suffix_only_difference`：「华远科技集团」与「华远科技有限公司」核心串相同，
+           但法律上是两个主体，只能进复核（ADR-0007 的安全规则，不因这次改动放宽）；
+        3. 客户名规范化后不能是空串（名字只有后缀时无法据此认人）。
+
+        多个客户同时命中时取**仓储顺序里的第一个**：与 L0-a 的遍历口径一致，
+        同一批数据每次得到同一个结论。
+        """
+        for lead in leads:
+            core = normalized_org(lead.name, self._aliases)
+            if not core:
+                continue
+            for name in names:
+                if normalized_org(name, self._aliases) != core:
+                    continue
+                if suffix_only_difference(name, lead.name):
+                    continue
+                return lead
+        return None
 
     # -------------------------------------------------------------- 人工处置
 
@@ -728,6 +777,17 @@ class SortingService:
         except KeyError:
             return None
         return spec if isinstance(spec, dict) else None
+
+    def _todo_values(self, lead_id: str | None) -> dict[str, str]:
+        """该客户模板 `todo.values`（分区 → 价值文案）：出库建议 `value_offered` 的兜底来源。
+
+        与今日待办读同一段模板（`domain/todo.py` 的 `todo_spec`），两处不各写一份文案表。
+        模板没装配、客户还没有归属（待认领池）、模板没配 `todo` 段时返回空映射——
+        这时 `value_offered` 宁可留空，也不拿日期或金额冒充「给客户的东西」。
+        """
+        spec = self._template_spec(lead_id) or self._default_template_spec()
+        parsed = todo_spec(spec) if spec is not None else None
+        return dict(parsed[0]) if parsed is not None else {}
 
     def _sync_lead_fields(self, lead_id: str) -> dict[str, str]:
         """把当前事实补进线索字段（只补缺的键），返回这次补上的字段。

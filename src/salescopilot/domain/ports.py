@@ -122,13 +122,25 @@ class DraftRepository(Protocol):
 
 
 class DraftGenerator(Protocol):
-    """话术生成器端口：只知道「线索 + 事实 + 资料片段」，返回草稿与用到的资料编号。
+    """话术生成器端口：只知道「线索 + 事实 + 资料片段（＋今天与已约定时间）」。
 
     `used_hit_indexes` 是 `hits` 的**0 基下标**；一个都没有就表示「没用资料」，
     用例层会拒绝入库。失败（网络、超时、输出解析不了）抛 `DraftError`。
+
+    `today` / `agreed_at` 由用例层给（`YYYY-MM-DD`，没有约定就是空串）：模型不知道今天
+    几号就会写出已经过去的日子，而这两值同时喂给提示词与落库前的日期校验，
+    两边必须来自同一处，否则「提示词说一套、校验判一套」。
     """
 
-    def draft(self, *, lead: Lead, facts: list[Fact], hits: list[dict]) -> DraftResult: ...
+    def draft(
+        self,
+        *,
+        lead: Lead,
+        facts: list[Fact],
+        hits: list[dict],
+        today: str = "",
+        agreed_at: str = "",
+    ) -> DraftResult: ...
 
 
 class SortingBatchRepository(Protocol):

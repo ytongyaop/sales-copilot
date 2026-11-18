@@ -1,12 +1,16 @@
 """话术草稿用例：生成 → 校验 → 落库（pending）→ 确认成跟进 / 丢弃。
 
-这一层是「能不能落库」的唯一裁判，四条硬门槛按顺序执行，任一不过就不产出草稿：
+这一层是「能不能落库」的唯一裁判，五道门槛按顺序执行，任一不过就不产出草稿：
 1. 线索存在；
 2. 至少有一条客户事实（没有事实就没有可写的内容）；
 3. 检索到资料依据，且模型确实引用了其中至少一条（无出处的草稿等于编）；
-4. 正文不含禁用词。
+4. 正文不含禁用词；
+5. 正文里的日期站得住：不早于今天，且与客户已约定时间一致（`domain/draft.check_dates`）。
+   这一道不过时**重试一次**（同一个问题再问一遍，与「空引用重试」同一套「最多一次」）；
+   两次都不行就拒绝，并把原因写清楚。
 
-生成器（`DraftGenerator`）只负责「写」，本层只负责「收不收」。
+生成器（`DraftGenerator`）只负责「写」，本层只负责「收不收」。今天与「已约定时间」由本层
+从注入的时钟与仓储取，再交给生成器写进提示词——模型不知道今天是几号，就不可能不写错日子。
 """
 
 import uuid
@@ -17,15 +21,19 @@ from salescopilot.domain.draft import (
     build_citations_payload,
     build_query,
     check_banned,
+    check_dates,
     validate_confirm,
 )
 from salescopilot.domain.errors import DraftError, KnowledgeError
+from salescopilot.domain.grading import parse_iso_date
 from salescopilot.domain.models import (
     DRAFT_CONFIRMED,
     DRAFT_DISCARDED,
     DRAFT_PENDING,
     Draft,
+    Fact,
     Followup,
+    Lead,
 )
 from salescopilot.domain.ports import (
     DraftGenerator,
@@ -42,6 +50,10 @@ SEARCH_K = 4
 
 # 检索语句最多拼多少条事实：事实再多，查询词也该保持短。
 QUERY_MAX_FACTS = 8
+
+# 一次生成最多问模型几次：第一次照样问；只有「日期不合格」会再问第二次（与空引用重试
+# 同一套「最多一次」的口径），其余门槛一次不过就拒绝。
+MAX_GENERATE_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -93,7 +105,12 @@ class DraftService:
     # ------------------------------------------------------------------ 生成
 
     def generate(self, lead_id: str) -> tuple[DraftOutcome, list[ValidationIssue]]:
-        """按四道门槛生成一条草稿；不通过就返回问题，绝不落库。"""
+        """按五道门槛生成一条草稿；不通过就返回问题，绝不落库。
+
+        「日期不合格」会重试一次：模型第一次写了过去的日期（或与约定不符），说明它没吃透
+        今天几号，再问一遍通常就对了——但只重试一次，两次都编就拒绝，不让人替它挑日子。
+        重试时用的仍是同一份事实与资料（不换题目），所以成本可预期：最坏两次调用。
+        """
         lead = self._leads.get(lead_id)
         if lead is None:
             return _fail([ValidationIssue("lead_id", "线索不存在")])
@@ -111,32 +128,48 @@ class DraftService:
         if not hits:
             return _fail([ValidationIssue("draft", "没有检索到资料依据，无法生成话术")])
 
-        try:
-            result = self._generator.draft(lead=lead, facts=facts, hits=hits)
-        except DraftError as exc:
-            return _fail([ValidationIssue("draft", str(exc))])
+        today_text = self._today()
+        today = parse_iso_date(today_text)
+        agreed = self._agreed_at(lead, facts)
 
-        text = result.text.strip() if isinstance(result.text, str) else ""
-        if not text:
-            return _fail([ValidationIssue("draft", "模型没有返回话术内容")])
+        for attempt in range(1, MAX_GENERATE_ATTEMPTS + 1):
+            try:
+                result = self._generator.draft(
+                    lead=lead, facts=facts, hits=hits, today=today_text, agreed_at=agreed
+                )
+            except DraftError as exc:
+                return _fail([ValidationIssue("draft", str(exc))])
 
-        used = [index for index in result.used_hit_indexes if 0 <= index < len(hits)]
-        if not used:
-            return _fail(
-                [
-                    ValidationIssue(
-                        "draft",
-                        "模型没有引用任何资料，已拒绝生成（可补充资料，或在跟进里写明依据后再生成）",
-                    )
-                ]
+            text = result.text.strip() if isinstance(result.text, str) else ""
+            if not text:
+                return _fail([ValidationIssue("draft", "模型没有返回话术内容")])
+
+            used = [index for index in result.used_hit_indexes if 0 <= index < len(hits)]
+            if not used:
+                return _fail(
+                    [
+                        ValidationIssue(
+                            "draft",
+                            "模型没有引用任何资料，已拒绝生成（可补充资料，或在跟进里写明依据后再生成）",
+                        )
+                    ]
+                )
+            citations = build_citations_payload([hits[index] for index in used])
+            if not citations:
+                return _fail([ValidationIssue("draft", "模型引用的资料没有正文")])
+
+            banned = check_banned(text)
+            if banned:
+                return _fail(banned)
+
+            # 时钟不是 YYYY-MM-DD 时判不了日子：这一道跳过（其余门槛照旧），不拿系统时钟硬判。
+            date_issues = (
+                check_dates(text, today=today, appointment_at=agreed) if today is not None else []
             )
-        citations = build_citations_payload([hits[index] for index in used])
-        if not citations:
-            return _fail([ValidationIssue("draft", "模型引用的资料没有正文")])
-
-        banned = check_banned(text)
-        if banned:
-            return _fail(banned)
+            if not date_issues:
+                break
+            if attempt == MAX_GENERATE_ATTEMPTS:
+                return _fail(date_issues)
 
         draft = Draft(
             id=str(uuid.uuid4()),
@@ -154,6 +187,39 @@ class DraftService:
         return DraftOutcome(True, draft.id, text, citations, draft.model), []
 
     # ------------------------------------------------------------------ 确认
+
+    def _today(self) -> str:
+        """今天（`YYYY-MM-DD`）：只切注入时钟的日期部分，本层不自己取时钟。"""
+        return self._clock()[:10]
+
+    def _agreed_at(self, lead: Lead, facts: list[Fact]) -> str:
+        """客户已约定时间（`YYYY-MM-DD`）：取几个来源里**最晚**的那个合法日期，没有就空串。
+
+        来源依次是：事实 `appointment_at`、线索字段 `appointment_at`、最近一条跟进的
+        `next_followup_at`。为什么不只认事实：真实数据里事实常常记着**上一次**见面的日子
+        （已过去），而「下周三」这种新约定记在跟进的 `next_followup_at` 上；只认前者会让
+        模型把话术引回一个已经过去的日子——那正是这次要修的错。
+
+        全都是过去的日子时同样返回它（由 `check_dates` 的「早于今天」那一条拦），
+        本层不替业务判断「过期约定算不算约定」。
+        """
+        candidates: list[str] = []
+        for fact in facts:
+            if fact.field == "appointment_at" and isinstance(fact.value, str):
+                candidates.append(fact.value)
+        field_value = lead.fields.get("appointment_at") if isinstance(lead.fields, dict) else None
+        if isinstance(field_value, str):
+            candidates.append(field_value)
+        if self._followups is not None:
+            for followup in self._followups.list_for(lead.id):
+                if isinstance(followup.next_followup_at, str):
+                    candidates.append(followup.next_followup_at)
+
+        dates = [parse_iso_date(value.strip()) for value in candidates]
+        found = [value for value in dates if value is not None]
+        if not found:
+            return ""
+        return max(found).isoformat()
 
     def confirm(
         self,

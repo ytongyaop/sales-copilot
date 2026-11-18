@@ -10,7 +10,12 @@ from datetime import date, timedelta
 
 import pytest
 
-from salescopilot.domain.grading import DimScore, grade_from_facts, parse_amount
+from salescopilot.domain.grading import (
+    DimScore,
+    grade_from_facts,
+    parse_amount,
+    parse_amount_detail,
+)
 from salescopilot.domain.models import Fact
 
 TODAY = date(2026, 11, 18)
@@ -201,6 +206,50 @@ def test_parse_amount_handles_common_styles() -> None:
     assert parse_amount("三十万元") == 300_000
     assert parse_amount("abc") is None
     assert parse_amount("") is None
+
+
+# ---------------------------------------------------------------- 金额区间（真模型暴露）
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_score"),
+    [
+        ("60万到80万", 1.0),
+        ("10-20万", 0.7),
+        ("5万到8万", 0.4),
+    ],
+)
+def test_amount_range_uses_the_lower_bound(text: str, expected_score: float) -> None:
+    """区间一律取下限：`60万到80万` 是 60 万的单，不是 80 万的单。"""
+    result = grade_from_facts(SPEC, [_fact("amount", text)], today=TODAY)
+    amount_dim = _dim(result, "amount")
+
+    assert amount_dim.known is True, text
+    assert amount_dim.score == expected_score, text
+    assert "取区间下限" in result.reason, text
+
+
+@pytest.mark.parametrize("text", ["abc到def"])
+def test_unparsable_amount_range_is_unknown(text: str) -> None:
+    """两端都解析不了才算未知：这不是「金额为 0」，理由里说「无法解析」。"""
+    result = grade_from_facts(SPEC, [_fact("amount", text)], today=TODAY)
+    amount_dim = _dim(result, "amount")
+
+    assert amount_dim.known is False
+    assert "金额无法解析" in result.reason
+
+
+def test_parse_amount_accepts_every_range_separator() -> None:
+    """四种分隔写法（到 / 至 / ~ / -）都认得，单位只写一端也照样还原。"""
+    for text in ("60万到80万", "60万至80万", "60万~80万", "60-80万", "60万-80万元"):
+        assert parse_amount(text) == 600_000, text
+
+    detail = parse_amount_detail("60万到80万")
+    assert detail is not None
+    assert detail.is_range is True
+    assert (detail.low, detail.high) == (600_000, 800_000)
+    # 不是区间时两端为空：`is_range` 据此为 False，理由里就不会多一句「取下限」。
+    assert parse_amount_detail("80万").is_range is False
 
 
 # ---------------------------------------------------------------- 紧迫度分档

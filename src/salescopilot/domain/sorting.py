@@ -55,6 +55,18 @@ _MAX_TRUNCATE = 10
 # 诊断消息的固定前缀：`elements[3]：原因`，上层据此把下标还原成 `dropped`。
 _DIAGNOSTIC = re.compile(r"^elements\[(\d+)\]：(.*)$")
 
+# `value_offered` 只能写「给对方的东西」：整串是日期（ISO / `11月25日`）或纯数字（含金额）
+# 的，都不是资料/案例/方案，按规则退回模板文案。
+# 相对时间说法（`下周一`）不在此列：它不是确定日期，也不冒充「给的东西」的具体日期，
+# 拦它反而会把原本可用的要素值一起丢掉。
+_OFFERED_DATE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
+_OFFERED_CN_DATE = re.compile(r"^\d{1,2}月\d{1,2}[日号]$")
+_OFFERED_NUMERIC = re.compile(r"^[\d\s.,:：+\-–—/%~～¥￥元块万wW年月日号]+$")
+
+# 没有缺项时 `value_offered` 退回哪一块的模板文案：与 `domain/todo.py` 同一口径
+# （第一个缺项所在分区；一项不缺就取 followup），两处不再各写一套。
+OFFERED_FALLBACK_SECTION = "followup"
+
 
 @dataclass(frozen=True)
 class ElementHit:
@@ -211,43 +223,96 @@ def validate_decision_reason(action: str, reason: str | None) -> list[Validation
     return []
 
 
-def build_next_action(elements: list[ElementHit], missing_sections: list[str]) -> dict:
+def build_next_action(
+    elements: list[ElementHit],
+    missing_sections: list[str],
+    *,
+    fallback_values: dict[str, str] | None = None,
+) -> dict:
     """按固定顺序给出库建议：先补缺项，没有缺项再指向最近一次约定的时间。
 
     - `missing_sections` 非空：动作指向**最先缺**的那一块，`value_offered` 取该块里
       置信度最高的一条要素（该块一条都没有时取全局最高），人一眼知道「补它之前手上
       已经有什么」；
-    - 没有缺项：找最后一条时间类字段（`TIME_FIELDS`），`due_hint` 与 `value_offered`
-      都用它；一条都没有就退成「确认下一次联系时间」；
-    - `value_offered` 为空（没有任何要素可用）时 `action` 置空，由用例层拒绝生成。
+    - 没有缺项：找最后一条时间类字段（`TIME_FIELDS`），`due_hint` 用它；`value_offered`
+      **不**再用那个时间（见下），改成模板文案；
+    - `value_offered` 只允许是「给对方的东西」（资料 / 案例 / 方案 / 测评）：命中的取值
+      是日期或纯数字（金额、电话号码都算）时一律丢弃，换成模板 `todo.values` 里对应分区
+      的文案（分区口径与 `domain/todo.py` 一致）；模板也没有就留空——留空比把日期塞进
+      「提供什么」这一格诚实，前端本来就不显示空建议；
+    - 一条要素都没有时 `action` 为空，由用例层拒绝生成（这一条不因 `fallback_values`
+      而放宽：没有要素的单子本来就没有可出库的依据）。
 
-    返回的字典三键恒在：`action` / `value_offered` / `due_hint`。
+    `fallback_values` 是模板 `todo.values`（分区 → 文案），由用例层按该客户的模板传入；
+    本函数不读模板、不猜文案。返回的字典三键恒在：`action` / `value_offered` / `due_hint`。
     """
     missing = [section for section in missing_sections if section in CARD_SECTIONS]
     if missing:
         section = missing[0]
-        offered = _best_value(elements, section)
-        if not offered:
+        base = _best_value(elements, section)
+        if not base:
             return {"action": "", "value_offered": "", "due_hint": ""}
         return {
             "action": f"补齐「{SECTION_LABELS.get(section, section)}」要素",
-            "value_offered": offered,
+            "value_offered": _offered_value(base, _fallback_value(fallback_values, section)),
             "due_hint": "",
         }
 
     time_hits = [element for element in elements if element.field in TIME_FIELDS]
     if not time_hits:
-        offered = _best_value(elements, None)
-        if not offered:
+        base = _best_value(elements, None)
+        if not base:
             return {"action": "", "value_offered": "", "due_hint": ""}
-        return {"action": "确认下一次联系时间", "value_offered": offered, "due_hint": ""}
+        return {
+            "action": "确认下一次联系时间",
+            "value_offered": _offered_value(
+                base, _fallback_value(fallback_values, OFFERED_FALLBACK_SECTION)
+            ),
+            "due_hint": "",
+        }
 
     latest = time_hits[-1]
     return {
         "action": f"按约定时间（{latest.value}）跟进",
-        "value_offered": latest.value,
+        "value_offered": _offered_value(
+            latest.value, _fallback_value(fallback_values, OFFERED_FALLBACK_SECTION)
+        ),
         "due_hint": latest.value,
     }
+
+
+def _offered_value(raw: str, fallback: str) -> str:
+    """`value_offered` 的取值口径：能当「给的东西」就用原值，否则退回模板文案。
+
+    判据只看整串的形状（日期 / 纯数字），不做语义理解：模型把「2026-11-25」写进
+    「这次能给对方什么」时，任何语言模型都读得出那不是资料，规则同样读得出。
+    """
+    text = raw.strip() if isinstance(raw, str) else ""
+    if text and not looks_like_date_or_number(text):
+        return text
+    return fallback.strip() if isinstance(fallback, str) else ""
+
+
+def looks_like_date_or_number(value: str) -> bool:
+    """整串是不是日期（ISO / `11月25日`）或纯数字（含金额、电话号码）。
+
+    只判形状，不解析日期本身：`2026-13-45` 也算「日期形状」，因为它同样不能当
+    「给客户的东西」。空串返回 False（空是另一条规则：`action` 也空就不生成）。
+    """
+    text = value.strip() if isinstance(value, str) else ""
+    if not text:
+        return False
+    return bool(
+        _OFFERED_DATE.match(text) or _OFFERED_CN_DATE.match(text) or _OFFERED_NUMERIC.match(text)
+    )
+
+
+def _fallback_value(values: dict[str, str] | None, section: str) -> str:
+    """模板里该分区的价值文案：没有模板、没有这一段就返回空串（不拿别的分区凑）。"""
+    if not isinstance(values, dict):
+        return ""
+    text = values.get(section)
+    return text if isinstance(text, str) else ""
 
 
 def contact_tokens(text: str) -> set[str]:

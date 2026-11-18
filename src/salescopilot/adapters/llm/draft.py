@@ -15,6 +15,7 @@
 
 import json
 import time
+from datetime import date, timedelta
 
 from openai import OpenAI
 
@@ -39,6 +40,9 @@ _REASON_MAX_LEN = 80
 # 假实现默认的下一步时间：固定值，保证离线测试可断言。
 FAKE_NEXT_STEP = "周三上午十点"
 
+# 假实现「编日期」时写的日子：`today - 3 天`，确定是过去的日子（`11月11日`）。
+FAKE_PAST_DATE_OFFSET_DAYS = 3
+
 # 第一次写了话术却一条资料都没引用时，追加在 user 消息末尾的强化指令（只追加一次）。
 NO_CITATION_HINT = (
     "【重要】你刚才没有引用任何资料。请重新写一次：话术里必须体现至少一条资料片段中的"
@@ -50,14 +54,27 @@ class FakeDrafter:
     """确定性假生成器：把事实和第一条资料拼成一句，永远引用第 1 条资料。
 
     `bad_mode=True` 时故意写进禁用词（「保过」），用来反证「草稿含禁用词必须拒收」。
+    `bad_dates=N` 时**前 N 次**调用故意写一个已经过去的日期（`today - 3 天`，形如 `11月11日`），
+    用来反证「日期站不住要重试一次、两次都编就拒绝」；`calls` 记着被问了几次。
     引用的第一条资料如果不存在，就返回空引用——用来反证「没引用资料必须拒收」。
     """
 
-    def __init__(self, *, bad_mode: bool = False, cite: bool = True) -> None:
+    def __init__(self, *, bad_mode: bool = False, cite: bool = True, bad_dates: int = 0) -> None:
         self._bad_mode = bad_mode
         self._cite = cite
+        self._bad_dates = bad_dates
+        self.calls = 0
 
-    def draft(self, *, lead: Lead, facts: list[Fact], hits: list[dict]) -> DraftResult:
+    def draft(
+        self,
+        *,
+        lead: Lead,
+        facts: list[Fact],
+        hits: list[dict],
+        today: str = "",
+        agreed_at: str = "",
+    ) -> DraftResult:
+        self.calls += 1
         need = _first_value(facts, "need") or "你的需求"
         amount = _first_value(facts, "amount")
         hit_index, piece = _first_citable(hits) if self._cite else (None, "")
@@ -67,6 +84,11 @@ class FakeDrafter:
         if piece:
             text += f"。根据资料：{piece.strip()[:60]}"
         text += f"。我们{FAKE_NEXT_STEP}再聊一次，看看是否合适？"
+        if self.calls <= self._bad_dates:
+            text += f"{_past_date_text(today)}现场演示方便吗？"
+        elif agreed_at and self._bad_dates:
+            # 重试那一次写成「与客户已约定时间一致」的日子：证明「改对了就收」这条路走得通。
+            text += f"{_agreed_text(agreed_at)}那天再确认一次，方便吗？"
         if self._bad_mode:
             text += "（保过）"
 
@@ -103,8 +125,22 @@ class DeepSeekDrafter:
         self._prompt_version = prompt_version
         self._max_retries = max(0, int(max_retries))
 
-    def draft(self, *, lead: Lead, facts: list[Fact], hits: list[dict]) -> DraftResult:
-        user_prompt = build_draft_user_prompt(facts=list(facts), hits=list(hits), stage=lead.stage)
+    def draft(
+        self,
+        *,
+        lead: Lead,
+        facts: list[Fact],
+        hits: list[dict],
+        today: str = "",
+        agreed_at: str = "",
+    ) -> DraftResult:
+        user_prompt = build_draft_user_prompt(
+            facts=list(facts),
+            hits=list(hits),
+            stage=lead.stage,
+            today=today,
+            agreed_at=agreed_at,
+        )
         system_message = {"role": "system", "content": DRAFT_SYSTEM_PROMPT}
 
         started = time.perf_counter()
@@ -163,6 +199,29 @@ class DeepSeekDrafter:
             return text, used, _total_tokens(response)
 
         raise DraftError(f"话术生成失败：{reason}（已尝试 {attempts} 次）")
+
+
+def _past_date_text(today: str) -> str:
+    """`today` 往前三天的中文日期（`11月11日`）：假实现用来故意写一个过去的日子。
+
+    `today` 不是 `YYYY-MM-DD` 时退回一个固定的过去日子（`11月15日`），
+    保证「编日期」这条用例在任何时钟下都还在测同一件事。
+    """
+    try:
+        base = date.fromisoformat(today.strip() if isinstance(today, str) else "")
+    except ValueError:
+        return "11月15日"
+    day = base - timedelta(days=FAKE_PAST_DATE_OFFSET_DAYS)
+    return f"{day.month}月{day.day}日"
+
+
+def _agreed_text(agreed_at: str) -> str:
+    """`2026-11-25` → `11月25日`：重试那一次按约定写日子。"""
+    try:
+        day = date.fromisoformat(agreed_at.strip())
+    except ValueError:
+        return agreed_at
+    return f"{day.month}月{day.day}日"
 
 
 def _first_value(facts: list[Fact], field: str) -> str:

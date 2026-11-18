@@ -1,10 +1,12 @@
 """话术用例的四道门槛与确认/丢弃流程（假知识库 + 假生成器，全程离线）。
 
-四条反证：
+反证清单：
 1. 没有事实 → 拒绝；
 2. 没有检索到资料 → 拒绝（硬门槛）；
 3. 模型没引用资料 → 拒绝；
-4. 草稿含禁用词 → 拒绝。
+4. 草稿含禁用词 → 拒绝；
+5. 草稿写了**过去**的日期 → 重试一次（重试改对了就收）；
+6. 两次都写过去的日期 → 拒绝，并给中文原因（不落库）。
 """
 
 import itertools
@@ -177,6 +179,39 @@ def test_generate_uses_fact_values_as_query(tmp_path: Path) -> None:
     service.generate("lead-1")
 
     assert knowledge.queries == ["need=想了解退费规则"]
+
+
+def test_generate_retries_once_when_the_draft_writes_a_past_date(tmp_path: Path) -> None:
+    """第一次编了个过去的日期（11月11日）→ 再问一次；第二次按约定写（11月20日）就收。"""
+    drafter = FakeDrafter(bad_dates=1)
+    service, facts, drafts, _, _ = _service(tmp_path, drafter=drafter)
+    _add_fact(facts, field="appointment_at", value="2026-11-20")
+
+    outcome, issues = service.generate("lead-1")
+
+    assert issues == []
+    assert outcome.ok is True
+    assert drafter.calls == 2, "日期不合格要重试一次（只一次）"
+    assert "11月11日" not in outcome.text, "编出来的过去日子不许进草稿"
+    assert "11月20日" in outcome.text, "重试那次要按客户已约定时间写"
+    assert drafts.get(outcome.draft_id) is not None
+
+
+def test_generate_rejects_when_both_attempts_write_a_past_date(tmp_path: Path) -> None:
+    """两次都编过去的日期 → 拒绝落库，并给中文原因（说清是哪天早于哪天）。"""
+    drafter = FakeDrafter(bad_dates=2)
+    service, facts, drafts, _, _ = _service(tmp_path, drafter=drafter)
+    _add_fact(facts)
+
+    outcome, issues = service.generate("lead-1")
+
+    assert outcome.ok is False
+    assert outcome.draft_id is None
+    assert drafter.calls == 2, "只重试一次，不无限重问模型"
+    assert [issue.location for issue in issues] == ["draft.text"]
+    assert "早于今天" in issues[0].message
+    assert "11月11日" in issues[0].message and "2026-11-14" in issues[0].message
+    assert drafts.list_for("lead-1") == [], "被拒的草稿一条都不许落库"
 
 
 def test_confirm_without_next_date_is_rejected(tmp_path: Path) -> None:

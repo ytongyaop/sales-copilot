@@ -8,6 +8,7 @@
 
 打分口径（四维，各维 0–1，乘权重后相加）：
 - `amount` 成交金额：≥50 万 → 1.0；≥10 万 → 0.7；>0 → 0.4（解析不了 → 未知）；
+  写成区间（`60万到80万`）时取**下限**，理由里注明「取区间下限」，理由见 `parse_amount`；
 - `urgency` 紧迫度：距今天 ≤7 天 → 1.0；≤30 天 → 0.6；其余 → 0.3（没有约定时间 → 未知）；
 - `clarity` 决策清晰度：决策者与决策流程都有 → 1.0；只有一项 → 0.5；都没有 → 未知；
 - `fit` 需求匹配度：我方匹配点 → 1.0；只有核心需求 → 0.5；都没有 → 未知。
@@ -100,6 +101,10 @@ MAX_BASIS = 6
 _NUMERIC_AMOUNT = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(万|w)?$")
 # 金额里可以直接忽略的装饰：货币符号、千分位、空白、「元 / 块」（`人民币` 单独替换）。
 _AMOUNT_NOISE = re.compile(r"[,\s¥￥元块]")
+# 区间的分隔写法：`60万到80万` / `60万~80万` / `60万至80万` / `60-80万` / `60万—80万`。
+_AMOUNT_RANGE_SEP = re.compile(r"到|至|[~～—–\-]")
+# 单位倍数：`万 / w` 是一万，`亿` 是一亿；没写单位就是元。
+_UNIT_FACTORS = {"万": 10_000.0, "w": 10_000.0, "W": 10_000.0}
 _CN_DIGITS = {
     "零": 0,
     "〇": 0,
@@ -145,6 +150,24 @@ class GradingResult:
     dims: list[DimScore]
     reason: str
     basis: list[str]
+
+
+@dataclass(frozen=True)
+class AmountParse:
+    """一次金额解析的结果：`value`（元）＋ 区间两端（不是区间时两端恒为空）。
+
+    `value` 恒是**用于分档的那个数**：写成区间时取下限。区间给的是范围，分档只能吃一个
+    确定数，宁可把单子看小一点，也不把「60 万到 80 万」当成 80 万的大单。
+    """
+
+    value: float
+    low: float | None = None
+    high: float | None = None
+
+    @property
+    def is_range(self) -> bool:
+        """两端都解析出来才算区间（只写对一端时按那一端处理，不当区间）。"""
+        return self.low is not None and self.high is not None
 
 
 def grading_spec(spec: dict) -> dict:
@@ -203,7 +226,21 @@ def parse_amount(text: str) -> float | None:
     """把常见金额写法解析成「元」；解析不了返回 `None`（不猜、不当 0）。
 
     支持的写法：`800000` / `80万` / `80w` / `1.5万` / `八十万` / `三十万` /
-    `一百二十万` / `10,000` / `¥800000` / `三十万元`。其余（如 `abc`、`约三十万`）返回 None。
+    `一百二十万` / `10,000` / `¥800000` / `三十万元`，以及**区间**：
+    `60万到80万` / `60-80万` / `60万~80万` / `60万至80万`。
+
+    区间一律取**下限**（两端都能解析时取小的那个）；只有一端可解析就用那一端；
+    两端都解析不了（如 `abc到def`）才返回 `None`。其余写法（如 `约三十万`）同样返回 None。
+    """
+    detail = parse_amount_detail(text)
+    return detail.value if detail is not None else None
+
+
+def parse_amount_detail(text: str) -> AmountParse | None:
+    """同 `parse_amount`，但把「是不是区间、两端各是多少」一并交回，供理由里说明口径。
+
+    取区间下限这件事必须能被复核：`_parse_notes` 据此在理由里写「金额取区间下限 60 万」，
+    否则人只看到 60 万，会以为原文就写了 60 万。
     """
     raw = text.strip() if isinstance(text, str) else ""
     if not raw:
@@ -212,13 +249,56 @@ def parse_amount(text: str) -> float | None:
     if not cleaned:
         return None
 
-    match = _NUMERIC_AMOUNT.match(cleaned)
-    if match is not None:
-        number = float(match.group(1))
-        return number * 10_000 if match.group(2) else number
+    parts = [part for part in _AMOUNT_RANGE_SEP.split(cleaned) if part]
+    if len(parts) == 1:
+        single = _parse_amount_end(parts[0])
+        if single is None:
+            return None
+        return AmountParse(value=_amount_value(single, None))
 
-    chinese = _parse_chinese_number(cleaned)
-    return chinese
+    if len(parts) == 2:
+        left = _parse_amount_end(parts[0])
+        right = _parse_amount_end(parts[1])
+        if left is None and right is None:
+            return None
+        if left is None or right is None:
+            # 只写对了一端：这一端仍是可用信息，别因为另一端写坏就整条丢掉。
+            return AmountParse(value=_amount_value(left or right, None))
+        first = _amount_value(left, right)
+        second = _amount_value(right, left)
+        low, high = min(first, second), max(first, second)
+        return AmountParse(value=low, low=low, high=high)
+
+    return None
+
+
+def _parse_amount_end(text: str) -> tuple[float, float] | None:
+    """解析区间的一端：返回（数值, 单位倍数）；解析不了返回 None。
+
+    单位与数值分开返回，是因为中文里常把单位只写在第二端（`60-80万`），
+    这时第一端的 60 要沿用第二端的「万」，不能当成 60 元。
+    """
+    match = _NUMERIC_AMOUNT.match(text)
+    if match is not None:
+        unit = match.group(2) or ""
+        return float(match.group(1)), _UNIT_FACTORS.get(unit, 1.0)
+
+    value = _parse_chinese_number(text)
+    if value is None:
+        return None
+    if text.endswith("亿"):
+        return value / 100_000_000, 100_000_000.0
+    if text.endswith("万"):
+        return value / 10_000, 10_000.0
+    return value, 1.0
+
+
+def _amount_value(end: tuple[float, float], other: tuple[float, float] | None) -> float:
+    """把（数值, 单位）还原成元；自己没写单位、另一端写了时沿用另一端的单位。"""
+    number, factor = end
+    if factor == 1.0 and other is not None and other[1] != 1.0:
+        return number * other[1]
+    return number * factor
 
 
 def parse_iso_date(text: str) -> date | None:
@@ -374,15 +454,29 @@ def _reason(
 
 
 def _parse_notes(by_field: dict[str, Fact]) -> list[str]:
-    """有原文却解析不出来的维度：理由里点名，人一眼知道「该补一条能算的写法」。
+    """有原文却解析不出来的维度、以及写成区间而取了近似值的维度：理由里点名。
 
-    目前的解析口径只有金额（`80万 / 800000 / 八十万` 这类）；解析失败不当 0 分，
+    目前的解析口径只有金额（`80万 / 800000 / 八十万 / 60万到80万` 这类）；解析失败不当 0 分，
     所以必须写出来，否则「缺成交金额」和「金额写成了 abc」看起来是同一件事。
+    区间也同理：分档用的是下限，理由里必须说清「取区间下限 60 万」，人才知道 60 万是
+    我们选的口径，不是客户原话。
     """
     fact = by_field.get("amount")
-    if fact is not None and parse_amount(fact.value) is None:
+    if fact is None:
+        return []
+    detail = parse_amount_detail(fact.value)
+    if detail is None:
         return ["金额无法解析"]
+    if detail.is_range:
+        return [f"金额取区间下限 {_amount_label(detail.value)}"]
     return []
+
+
+def _amount_label(value: float) -> str:
+    """金额的人话：整万写「60 万」，不满一万写「8000 元」，其余保留一位小数。"""
+    if value >= 10_000:
+        return f"{value / 10_000:g} 万"
+    return f"{value:g} 元"
 
 
 def _basis(dims: list[DimScore], by_field: dict[str, Fact]) -> list[str]:

@@ -1,11 +1,16 @@
 """投料 → 分拣单的服务测试（临时库 + 假模型，全程离线）。
 
-五条判据：
+判据：
 1. 指定了线索就直接归属，状态待人确认；
 2. 不指定线索时走漏斗：联系方式精确键命中 → 自动归属，**归属没被问过模型**（计数断言）；
-3. 字符串只到复核区 → 进待认领池，`lead_id` 为空；
-4. 编造的出处被丢弃（`dropped` 有记录、该要素不落建议），模型原文仍原样留痕；
-5. 同一段原文重复投料不产生第二条原文（沿用采集的幂等口径）。
+3. 规范化全称一致（原文「华远建设集团」＝客户「华远建设集团」）同样算 L0 精确键：
+   待人确认、`scorer=exact`、**不调模型复核**（ADR-0007 的 L0 含「规范化全称」）；
+4. 只差组织形式后缀（「华远科技集团」vs「华远科技有限公司」）**不算**精确键，只能复核；
+5. 原文只有简称（「华远」）、原文里的名字没有后缀时也判不出精确键，照旧走模糊；
+6. 字符串只到复核区 → 进待认领池，`lead_id` 为空；
+7. 编造的出处被丢弃（`dropped` 有记录、该要素不落建议），模型原文仍原样留痕；
+8. 出库建议的 `value_offered` 不许是日期（模型给的日期值退回模板文案）；
+9. 同一段原文重复投料不产生第二条原文（沿用采集的幂等口径）。
 """
 
 import itertools
@@ -59,6 +64,14 @@ def _facts_from(elements, lead_id: str) -> list[Fact]:
 PHONE_CONTENT = "13800001111 那边说预算三十万，下周一下午再聊"
 # 只差一个字级差别：归一后 93 分，落进复核区而不是自动档。
 FUZZY_CONTENT = "华远建设工程有限公司那边说预算三十万，下周一下午再聊"
+# 原文里的机构名与客户名**完全一致**：规范化全称应当命中 L0，不调模型复核。
+EXACT_NAME_CONTENT = "华远建设集团那边说，预算 60万到80万，下周三下午到现场聊"
+# 只差组织形式后缀（集团 vs 有限公司）：核心串相同，法律上是两个主体，只能进复核。
+SUFFIX_ONLY_CONTENT = "华远科技集团那边说，预算 60万到80万，下周三下午到现场聊"
+# 原文只有简称「华远」，没有组织形式后缀：抽不出全称，判不出精确键。
+SHORT_NAME_CONTENT = "华远那边说预算三十万，下周三下午再聊"
+# 四块要素齐全：出库建议会从「时间字段」取值，正好用来反证 `value_offered` 不许是日期。
+FULL_CONTENT = "华远建设集团那边说预算 60万到80万，负责人王经理，下周三下午到现场聊"
 # 没有联系方式、也没有组织形式全称：判为新客户候选。
 NEW_CONTENT = "完全不相干的一通闲聊，预算还在谈，下周再说"
 
@@ -112,6 +125,34 @@ def _service(
     )
 
 
+def _service_with_names(
+    tmp_path: Path, *names: str
+) -> tuple[SortingService, FakeSorting, list[Lead]]:
+    """按给定名字建线索（顺序即 id 顺序），其余与 `_service` 一致。"""
+    db = tmp_path / "sorting_names.sqlite3"
+    leads = SqliteLeadRepository(db)
+    raws = SqliteRawItemRepository(db)
+    batches = SqliteSortingBatchRepository(db)
+    created: list[Lead] = []
+    for index, name in enumerate(names, start=1):
+        lead = Lead(
+            id=f"lead-{index}",
+            name=name,
+            contact="",
+            source="inbound",
+            stage=INITIAL_STAGE,
+            owner=None,
+            created_at=f"2026-11-18T09:0{index}:00+00:00",
+        )
+        leads.add(lead)
+        created.append(lead)
+    judge = FakeSorting()
+    service = SortingService(
+        leads, raws, batches, judge, clock=_clock(), template_loader=_template_loader
+    )
+    return service, judge, created
+
+
 def test_designated_lead_is_attributed_and_waits_for_review(tmp_path: Path) -> None:
     """传了 `lead_id`：归属确定，状态待人确认，建议三块齐全。"""
     service, _judge, _raws, _batches, lead = _service(tmp_path)
@@ -151,6 +192,60 @@ def test_exact_contact_key_auto_without_asking_model_for_attribution(tmp_path: P
     assert judge.review_calls == 0, "精确键命中时不该再让模型复核归属"
     assert judge.last_candidates == []
     assert judge.calls == 1, "分拣本身仍要调一次模型（要素 / 分级 / 出库）"
+
+
+def test_same_normalized_full_name_is_exact_without_review(tmp_path: Path) -> None:
+    """原文「华远建设集团」与客户同名：L0 规范化全称命中 → 待人确认、`scorer=exact`、不问模型。
+
+    反证的是真模型产出：句子里的全称与库里名字一字不差，候选分数 100，却仍进待认领池
+    （`scorer=fuzzy`）——因为旧实现只把手机 / 邮箱 / 信用代码当精确键。
+    """
+    service, judge, leads = _service_with_names(tmp_path, "华远建设集团")
+
+    outcome = service.sort(content=EXACT_NAME_CONTENT, source="paste")
+
+    assert outcome.batch is not None
+    assert outcome.batch.status == "pending_review"
+    assert outcome.batch.scorer == "exact"
+    assert outcome.batch.confidence == 100.0
+    assert outcome.batch.lead_id == leads[0].id
+    assert judge.review_calls == 0, "规范化全称命中也属于精确键，不该再让模型复核归属"
+    assert judge.last_candidates == []
+
+    # 判定理由要能回答「为什么算到这家」：写清是规范化全称一致，不是打分打出来的。
+    decision, candidates, resolved = service._attribute(EXACT_NAME_CONTENT)
+    assert decision.scorer == "exact"
+    assert "规范化全称一致" in decision.reason
+    assert resolved == leads[0].id
+    assert [item.scorer for item in candidates] == ["exact"]
+
+
+def test_suffix_only_difference_is_not_exact(tmp_path: Path) -> None:
+    """「华远科技集团」vs「华远科技有限公司」：核心串一样但主体不同 → 不进 auto。
+
+    ADR-0007 的这条安全规则不因 L0 补上「规范化全称」而放宽。
+    """
+    service, _judge, _leads = _service_with_names(tmp_path, "华远科技有限公司")
+
+    outcome = service.sort(content=SUFFIX_ONLY_CONTENT, source="paste")
+
+    assert outcome.batch is not None
+    assert outcome.batch.scorer != "exact", "仅组织形式不同不许算精确键"
+    assert outcome.batch.lead_id is None, "两个法人主体，不能自动归属"
+    assert outcome.batch.status == "pending_claim"
+    assert outcome.batch.scorer == "fuzzy"
+
+
+def test_short_name_only_is_not_exact(tmp_path: Path) -> None:
+    """原文只有简称「华远」：抽不出带后缀的全称，判不出精确键，照旧走模糊（或判新客户）。"""
+    service, _judge, _leads = _service_with_names(tmp_path, "华远建设集团")
+
+    outcome = service.sort(content=SHORT_NAME_CONTENT, source="paste")
+
+    assert outcome.batch is not None
+    assert outcome.batch.scorer != "exact"
+    assert outcome.batch.lead_id is None
+    assert outcome.batch.status == "pending_claim"
 
 
 def test_fuzzy_candidate_goes_to_pending_claim(tmp_path: Path) -> None:
@@ -226,6 +321,23 @@ def test_list_batches_reports_dropped_count(tmp_path: Path) -> None:
     assert issues == []
     counted = {item["id"]: item["dropped_count"] for item in items}
     assert counted == {outcome.batch.id: 1, "batch-broken": 0}
+
+
+def test_value_offered_is_never_a_date(tmp_path: Path) -> None:
+    """出库建议的「提供什么」不许是日期：落到模板 `todo.values` 的文案，日期留在 `due_hint`。
+
+    反证的是真模型产出：`next_action.value_offered = "2026-11-25"`——时间占了「给什么」这一格。
+    """
+    service, _judge, _raws, _batches, lead = _service(tmp_path)
+
+    outcome = service.sort(content=FULL_CONTENT, source="paste", lead_id=lead.id)
+
+    assert outcome.suggestion is not None
+    next_action = outcome.suggestion.next_action
+    template_value = TEMPLATES[lead.template]["todo"]["values"]["followup"]
+    assert next_action["due_hint"] == "2026-11-25", "约定时间仍要落在 due_hint 上"
+    assert next_action["value_offered"] == template_value
+    assert next_action["value_offered"] != next_action["due_hint"]
 
 
 def test_repeated_content_reuses_the_same_raw(tmp_path: Path) -> None:
