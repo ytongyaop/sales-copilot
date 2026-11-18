@@ -178,10 +178,14 @@ class SortingJudge(Protocol):
       被问归属——调用方可据实现里的计数断言这一点。
     - `review` 只给待认领池里的灰区单据做**一次归属复核**：从候选里挑一个（或明说
       挑不出来）并给理由。它只是建议，用例层不据此改 `lead_id`，等人认领。
+    - `today`（`YYYY-MM-DD`）由调用方从时钟取：实现方把它写进提示词，模型才能把
+      「下周三」这类相对说法换算成具体日期；本层不取时钟。
     失败（网络、超时、输出解析不了）一律抛 `domain/errors.py` 的 `SortingError`。
     """
 
-    def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult: ...
+    def judge(
+        self, *, content: str, candidates: list[Candidate], today: str = ""
+    ) -> SortingResult: ...
 
     def review(self, *, content: str, candidates: list[Candidate]) -> tuple[str | None, str]: ...
 

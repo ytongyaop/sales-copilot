@@ -11,6 +11,7 @@
 import hashlib
 import json
 import time
+from datetime import date
 
 from openai import OpenAI
 
@@ -22,8 +23,8 @@ from salescopilot.adapters.llm.prompts import (
 from salescopilot.adapters.llm.prompts_sorting import (
     REVIEW_SYSTEM_PROMPT,
     SORTING_PROMPT_VERSION,
-    SORTING_SYSTEM_PROMPT,
     build_review_user_prompt,
+    build_sorting_system_prompt,
     build_sorting_user_prompt,
 )
 from salescopilot.domain.errors import ExtractError, SortingError
@@ -164,13 +165,20 @@ class DeepSeekSorting:
         self._prompt_version = prompt_version
         self._max_retries = max(0, int(max_retries))
 
-    def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult:
-        """对一段原文跑一次分拣；返回三块建议与本次耗用，失败抛 `SortingError`。"""
+    def judge(self, *, content: str, candidates: list[Candidate], today: str = "") -> SortingResult:
+        """对一段原文跑一次分拣；返回三块建议与本次耗用，失败抛 `SortingError`。
+
+        `today`（`YYYY-MM-DD`）由调用方从时钟取：写进提示词，模型才能把「下周三」
+        换算成具体日期；没传就退回本机当天（唯一取时钟的地方是适配器层，不在 domain）。
+        """
+        day = today or date.today().isoformat()
         messages = [
-            {"role": "system", "content": SORTING_SYSTEM_PROMPT},
+            {"role": "system", "content": build_sorting_system_prompt(day)},
             {
                 "role": "user",
-                "content": build_sorting_user_prompt(content=content, candidates=list(candidates)),
+                "content": build_sorting_user_prompt(
+                    content=content, candidates=list(candidates), today=day
+                ),
             },
         ]
 

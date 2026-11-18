@@ -6,6 +6,8 @@
   灰区与「没有候选」一律进待认领池，不猜、不落客户；
 - 要素 / 分级 / 出库三块由 `domain/sorting.py` 校验与重算：`source_span` 对不上原文
   就丢弃那一条并记诊断，分级不合法就用规则兜底，出库建议按「先补缺项」重算；
+  时间类字段（`appointment_at` 等）的取值必须是 `YYYY-MM-DD`，模型给「下周三」
+  这类原话一律丢弃并记诊断——本层不猜日期，换算靠提示词里给模型的今天日期；
 - 模型返回的原始 JSON 文本原样落 `suggestion_json`（审计要「当时到底吐了什么」），
   丢弃诊断落 `dropped_json`；
 - 本层只编排，不写判断规则；路由只调本层。
@@ -23,6 +25,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+from salescopilot.domain.card import declared_sections
 from salescopilot.domain.errors import SortingError
 from salescopilot.domain.facts import allowed_fact_fields, decide_merge, fields_from_facts
 from salescopilot.domain.matching import (
@@ -53,9 +56,11 @@ from salescopilot.domain.rules import (
     CONTACT_TOO_SHORT,
     MIN_CONTACT_LEN,
     ValidationIssue,
+    _is_iso_date,
     merge_fields,
 )
 from salescopilot.domain.sorting import (
+    TIME_FIELDS,
     ElementHit,
     SortingSuggestion,
     build_next_action,
@@ -103,6 +108,9 @@ MIN_LEAD_NAME_LEN = 2
 
 # 分级兜底函数：入参是已过出处校验的要素，返回 {"value", "reason", "basis"}。
 Grader = Callable[[list[ElementHit]], dict]
+
+# 模板里 label 带这些字的就是时间类字段：取值必须是 ISO 日期，不许留「下周三」。
+TIME_FIELD_LABELS: tuple[str, ...] = ("时间", "日期")
 
 
 @dataclass(frozen=True)
@@ -196,6 +204,26 @@ class SortingService:
 
     # ------------------------------------------------------------------ 投料
 
+    def _today(self) -> str:
+        """今天（`YYYY-MM-DD`）：只切注入时钟的日期部分，本层不自己取时钟。"""
+        return self._clock()[:10]
+
+    def _time_fields(self, lead_id: str | None) -> set[str]:
+        """时间类字段：`TIME_FIELDS` 里的通用名 ∪ 该客户模板里 label 含「时间/日期」的字段。
+
+        模板取不到（没装配 / 无归属 / 模板未知）时只按字段名判——宁可多认几个通用名，
+        也不漏掉「约定时间」这类必须给 ISO 日期的字段。
+        """
+        names = set(TIME_FIELDS)
+        spec = self._template_spec(lead_id)
+        if spec is None:
+            return names
+        for _section_key, _label, items in declared_sections(spec):
+            for item in items:
+                if any(word in item["label"] for word in TIME_FIELD_LABELS):
+                    names.add(item["key"])
+        return names
+
     def sort(self, *, content: str, source: str, lead_id: str | None = None) -> SortingOutcome:
         """一段原文进，一张分拣单出；归属未定时 `lead_id` 为空、状态进待认领池。"""
         designated = None
@@ -230,15 +258,21 @@ class SortingService:
         candidate_payload = _candidate_dicts(candidates)
 
         # 3) 分拣模型：候选只在灰区交给它参考（精确键命中 / 判为新客户都不问归属）。
+        #    今天日期由这里从注入的时钟取，模型才能把「下周三」换算成具体日期。
         prompt_candidates = candidates if decision.band == "review" else []
         try:
-            result = self._extractor.judge(content=raw.content, candidates=prompt_candidates)
+            result = self._extractor.judge(
+                content=raw.content, candidates=prompt_candidates, today=self._today()
+            )
         except SortingError as exc:
             return SortingOutcome(None, [ValidationIssue("extractor", str(exc))])
 
-        # 4) 出处对齐：对不上原文的要素丢弃并留诊断，绝不落库。
-        elements, diagnostics = validate_elements(raw.content, result.payload.get("elements"))
-        dropped = _dropped(diagnostics)
+        # 4) 时间字段归一 + 出处对齐：时间不是 ISO 日期、对不上原文的要素都丢弃并留诊断。
+        raw_elements = result.payload.get("elements")
+        time_fields = self._time_fields(resolved_id)
+        kept_raw, bad_dates, index_map = _split_bad_dates(raw_elements, time_fields)
+        elements, diagnostics = validate_elements(raw.content, kept_raw)
+        dropped = bad_dates + _dropped(diagnostics, index_map)
 
         # 5) 分级：模型的合规就用它，不合规按要素规则兜底（不阻断分拣）。
         grading = _clean_grading(result.payload.get("grading"))
@@ -573,11 +607,20 @@ class SortingService:
 
         payload = _loads(batch.suggestion_json) or {}
         raw_elements = payload.get("elements")
-        elements, diagnostics = validate_elements(raw.content, raw_elements)
+        kept_raw, bad_dates, index_map = _split_bad_dates(raw_elements, self._time_fields(lead_id))
+        elements, diagnostics = validate_elements(raw.content, kept_raw)
         skipped: list[dict] = [
-            {"field": _element_field(raw_elements, index), "reason": message}
-            for index, message in (split_diagnostic(item) for item in diagnostics)
+            {"field": _element_field(raw_elements, entry["index"]), "reason": entry["reason"]}
+            for entry in bad_dates
         ]
+        for message in diagnostics:
+            index, reason = split_diagnostic(message)
+            skipped.append(
+                {
+                    "field": _element_field(raw_elements, _original_index(index, index_map)),
+                    "reason": reason,
+                }
+            )
 
         now = self._clock()
         allowed = self._allowed_fields(lead_id)
@@ -616,14 +659,24 @@ class SortingService:
 
         模板没装配 / 模板未知时退回旧默认——白名单只扩大不缩小，不让原本能落的字段被拒。
         """
+        return allowed_fact_fields(self._template_spec(lead_id))
+
+    def _template_spec(self, lead_id: str | None) -> dict | None:
+        """该客户模板的规格：没装配、线索不存在、模板未知都返回 None。
+
+        调用方据此退回旧默认（字段白名单 / 时间字段只按通用名认），不把「取不到模板」
+        当成错误——待认领池里的单本来就还没有客户。
+        """
+        if lead_id is None or self._template_loader is None:
+            return None
         lead = self._leads.get(lead_id)
-        if lead is None or self._template_loader is None:
-            return allowed_fact_fields()
+        if lead is None:
+            return None
         try:
             spec = self._template_loader(lead.template)
         except KeyError:
-            return allowed_fact_fields()
-        return allowed_fact_fields(spec if isinstance(spec, dict) else None)
+            return None
+        return spec if isinstance(spec, dict) else None
 
     def _sync_lead_fields(self, lead_id: str) -> dict[str, str]:
         """把当前事实补进线索字段（只补缺的键），返回这次补上的字段。
@@ -775,12 +828,57 @@ def _preview(content: str, *, limit: int = CONTENT_PREVIEW_LEN) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
-def _dropped(diagnostics: list[str]) -> list[dict]:
-    """把 `elements[i]：原因` 的诊断翻成 `{"index", "reason"}`；形状不对就原样带上原因。"""
+def _split_bad_dates(hits: object, time_fields: set[str]) -> tuple[list, list[dict], list[int]]:
+    """把时间类字段里不是 `YYYY-MM-DD` 的要素挑出来，返回（剩余原始要素, 丢弃项, 下标映射）。
+
+    `下标映射` 把「剩余的第 k 条」映回模型输出里的下标：`validate_elements` 的诊断编号
+    因此仍指回原始第几条，`dropped` 与 `skipped` 才能和模型原文对上。
+    """
+    items = hits if isinstance(hits, list) else []
+    kept: list = []
+    dropped: list[dict] = []
+    index_map: list[int] = []
+    for index, item in enumerate(items):
+        if isinstance(item, dict) and _bad_time_value(item, time_fields):
+            dropped.append({"index": index, "reason": _bad_time_reason(item)})
+            continue
+        kept.append(item)
+        index_map.append(index)
+    return kept, dropped, index_map
+
+
+def _bad_time_value(item: dict, time_fields: set[str]) -> bool:
+    """这条要素是不是「时间类字段但取值不是 ISO 日期」：是就丢弃（原文进不了流程字段）。"""
+    field = item.get("field")
+    value = item.get("value")
+    name = field.strip() if isinstance(field, str) else ""
+    text = value.strip() if isinstance(value, str) else ""
+    return name in time_fields and bool(text) and not _is_iso_date(text)
+
+
+def _bad_time_reason(item: dict) -> str:
+    """丢弃原因把模型原话带上：人一眼看出它把「下周三」当日期了。"""
+    value = item.get("value")
+    text = value.strip() if isinstance(value, str) else ""
+    return f"时间字段不是 YYYY-MM-DD（模型输出「{text}」）"
+
+
+def _original_index(index: int | None, index_map: list[int] | None) -> int | None:
+    """映射回模型输出的原始下标；没传映射或越界就原样返回（形状不对别抛异常）。"""
+    if index is None or index_map is None or not 0 <= index < len(index_map):
+        return index
+    return index_map[index]
+
+
+def _dropped(diagnostics: list[str], index_map: list[int] | None = None) -> list[dict]:
+    """把 `elements[i]：原因` 的诊断翻成 `{"index", "reason"}`；形状不对就原样带上原因。
+
+    `index_map` 是过了时间字段预检之后的下标映射：传了就换回模型输出的原始下标。
+    """
     dropped: list[dict] = []
     for message in diagnostics:
         index, reason = split_diagnostic(message)
-        dropped.append({"index": index, "reason": reason})
+        dropped.append({"index": _original_index(index, index_map), "reason": reason})
     return dropped
 
 

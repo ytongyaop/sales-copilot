@@ -162,3 +162,48 @@ def test_declared_field_keys_follow_display_order() -> None:
     assert declared_field_keys(SPEC) == tuple(ALL_KEYS)
     assert declared_field_keys({}) == ()
     assert declared_field_keys(None) == ()
+
+
+def test_same_key_in_two_sections_shows_the_same_value() -> None:
+    """同一 `field` key 在两个分区同时声明：两处都展示同一条事实的值。
+
+    这是**有意为之**（不是 bug）：`build_card` 按 `field` 名对表，事实层一个客户一个字段
+    只有一条当前事实（`domain/facts.py` 的 `decide_merge`），分区只是展示位置，
+    所以同一个 key 挂在两个分区时两处显示同一个值、覆盖度按声明条数各算一次。
+    写成用例锁住这个行为：将来真要按分区区分取值，必须是有意识地改，而不是顺手改坏。
+    """
+    spec = {
+        "card": {
+            "sections": {
+                "basic": {
+                    "label": "基础信息",
+                    "fields": [
+                        {"key": "company", "label": "公司全称", "question": "对方公司全称是什么？"}
+                    ],
+                },
+                "followup": {
+                    "label": "跟进记录",
+                    "fields": [
+                        {
+                            "key": "company",
+                            "label": "本次提到的公司",
+                            "question": "这次说的是哪家？",
+                        }
+                    ],
+                },
+            }
+        }
+    }
+
+    card = build_card(spec, [_fact("company", "华远建设有限公司")])
+
+    shown = [
+        (section.key, item.key, item.value) for section in card.sections for item in section.fields
+    ]
+    assert shown == [
+        ("basic", "company", "华远建设有限公司"),
+        ("followup", "company", "华远建设有限公司"),
+    ]
+    # 覆盖度按声明条数算：同一个 key 声明两次，就记成 2/2。
+    assert card.coverage == 1.0
+    assert card.missing == []

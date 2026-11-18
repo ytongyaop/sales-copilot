@@ -14,6 +14,7 @@
 import hashlib
 import json
 import re
+from datetime import date, timedelta
 
 from salescopilot.adapters.llm.prompts_sorting import SORTING_PROMPT_VERSION
 from salescopilot.domain.matching import Candidate
@@ -24,6 +25,10 @@ DEFAULT_CONFIDENCE = 0.8
 # 写进提炼账本的模型名与提示词版本：假模型固定这两个值，不与真模型混淆。
 MODEL_NAME = "fake"
 PROMPT_VERSION = "v0"
+
+# 假分拣器把「下周三」算成今天的第几天：固定 7 天，测试里 2026-11-18 → 2026-11-25。
+DEFAULT_TODAY = "2026-11-18"
+DATE_OFFSET_DAYS = 7
 
 _PRICE_WORDS = ("贵", "价格", "便宜")
 _HESITATE_WORDS = ("考虑", "再说", "商量")
@@ -132,30 +137,41 @@ _SORTING_NEED_WORDS = ("预算", "价格", "需求", "贵", "便宜", "考虑")
 _SORTING_ROLE_WORDS = ("老板", "负责人", "经理", "主任", "总监")
 _SORTING_TIME_WORDS = ("下周", "明天", "之后", "下个月", "周一", "周二", "周三")
 
+# 相对日期说法：非 ISO 用例（`bad_date=True`）要把「下周三」这种原话原样还给用例层。
+_TIME_PHRASE = re.compile(r"下(?:周[一二三四五六日天]?|个月)|明天|后天|之后")
+
 
 class FakeSorting:
     """关键词分拣器：按固定规则产出 2–4 条要素 + 一个分级 + 一个出库建议。
 
     - 每条要素的 `source_span` 都是原文里真实存在的**整句**（≥4 字），
       用例层因此能把它们一条不落地对齐回去；
+    - 时间类字段的 `value` 是**确定的 ISO 日期**：`today + 7 天`
+      （默认 2026-11-18 → 2026-11-25），`source_span` 仍是原文那句「下周三…」；
     - `bad_span=True` 时故意多吐一条原文里根本没有的要素，用来反证「编造的出处必被丢弃」；
+    - `bad_date=True` 时时间类字段故意吐原文里的「下周三」，用来反证「非 ISO 日期必被丢弃」；
     - `calls` / `review_calls` 是调用计数：`review_calls` 只在**归属灰区**（调用方传了
       候选）时加一，用来断言「精确键命中时模型没被问过归属」。
     """
 
-    def __init__(self, *, bad_span: bool = False) -> None:
+    def __init__(
+        self, *, bad_span: bool = False, bad_date: bool = False, today: str = DEFAULT_TODAY
+    ) -> None:
         self._bad_span = bad_span
+        self._bad_date = bad_date
+        self._today = today
         self.calls = 0
         self.review_calls = 0
         self.last_candidates: list[Candidate] = []
 
-    def judge(self, *, content: str, candidates: list[Candidate]) -> SortingResult:
+    def judge(self, *, content: str, candidates: list[Candidate], today: str = "") -> SortingResult:
+        """`today` 由调用方（用例层）从时钟取；没传就用构造参数（保证离线可断言）。"""
         self.calls += 1
         if candidates:
             self.review_calls += 1
             self.last_candidates = list(candidates)
 
-        elements = _sorting_elements(content)
+        elements = _sorting_elements(content, today=today or self._today, bad_date=self._bad_date)
         if self._bad_span:
             # 故意引用一句原文里没有的话：用例层必须丢掉它并在 dropped 里报出来。
             elements.append(
@@ -196,8 +212,14 @@ class FakeSorting:
         return best.lead_id, f"候选里「{best.name}」最接近（相似度 {best.score:.1f}），建议归给它"
 
 
-def _sorting_elements(content: str) -> list[dict]:
-    """按固定顺序抽要素：基础信息 → 需求 → 决策 → 跟进；抽不到就不给这一条。"""
+def _sorting_elements(
+    content: str, *, today: str = DEFAULT_TODAY, bad_date: bool = False
+) -> list[dict]:
+    """按固定顺序抽要素：基础信息 → 需求 → 决策 → 跟进；抽不到就不给这一条。
+
+    时间类字段（`appointment_at`）的取值固定是 `today + 7 天` 的 ISO 日期，
+    `source_span` 仍是原文那一句；`bad_date=True` 时故意把原话当取值（非 ISO）。
+    """
     elements: list[dict] = []
 
     org = _first_sentence_match(content, _ORG_SPAN)
@@ -217,12 +239,30 @@ def _sorting_elements(content: str) -> list[dict]:
 
     time_segment = _first_sentence_with(content, _SORTING_TIME_WORDS)
     if time_segment is not None:
-        when = next(word for word in _SORTING_TIME_WORDS if word in time_segment)
+        when = _time_phrase(time_segment) or next(
+            word for word in _SORTING_TIME_WORDS if word in time_segment
+        )
+        value = when if bad_date else (_iso_after(today, DATE_OFFSET_DAYS) or when)
         elements.append(
-            _element("followup", "appointment_at", when, time_segment, DEFAULT_CONFIDENCE)
+            _element("followup", "appointment_at", value, time_segment, DEFAULT_CONFIDENCE)
         )
 
     return elements
+
+
+def _time_phrase(text: str) -> str:
+    """原文里最长的相对日期说法（「下周三」优先于「下周」）：非 ISO 用例拿它当原话取值。"""
+    found = [match.group(0) for match in _TIME_PHRASE.finditer(text)]
+    return max(found, key=len) if found else ""
+
+
+def _iso_after(today: str, days: int) -> str:
+    """`today + days` 的 ISO 日期；`today` 不是 `YYYY-MM-DD` 时返回空串（不猜日期）。"""
+    try:
+        base = date.fromisoformat(today.strip() if isinstance(today, str) else "")
+    except ValueError:
+        return ""
+    return (base + timedelta(days=days)).isoformat()
 
 
 def _first_sentence_with(content: str, words: tuple[str, ...]) -> str | None:

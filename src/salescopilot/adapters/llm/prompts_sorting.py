@@ -4,12 +4,19 @@
 - 提示词是**数据**：它声明「模型该输出什么形状」，但「能不能落库」由
   `domain/sorting.py` 判——尤其是 `source_span`，对不上原文的要素一律丢弃；
 - `SORTING_PROMPT_VERSION` 会随分拣单一起留痕，改一个字就是一次新版本；
-- 只用 `json_object` 模式（DeepSeek 官方接口不支持 `json_schema` 严格模式，会 400）。
+- 只用 `json_object` 模式（DeepSeek 官方接口不支持 `json_schema` 严格模式，会 400）；
+- **今天日期由调用方传入**（`YYYY-MM-DD`）：本模块不取时钟，只负责把它讲进提示词。
 """
+
+from datetime import date
 
 from salescopilot.domain.matching import Candidate
 
-SORTING_PROMPT_VERSION = "v1"
+# v2：加入「今天日期」与「时间字段必须 ISO 日期」两条约束（相对日期「下周三」→ 具体日期）。
+SORTING_PROMPT_VERSION = "v2"
+
+# 星期几的中文名：只用来把「今天」讲清楚，模型据此把「下周三」换算成具体日期。
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 SORTING_SYSTEM_PROMPT = """你是销售流程里的分拣员，只负责把一段原文拆成三块结构化建议。
 
@@ -29,14 +36,38 @@ SORTING_SYSTEM_PROMPT = """你是销售流程里的分拣员，只负责把一�
 5. `grading.value` 只能是 A / B / C；`basis` 里每条也必须能在原文里逐字找到。
 6. `next_action.action` 必须具体（下一次做什么），`value_offered` 不许为空；
    时间线索能确定就写进 `due_hint`，不确定就留空字符串。
-7. 原文里没有的信息一律不写；不确定就少给，不要凑数。"""
+7. 原文里没有的信息一律不写；不确定就少给，不要凑数。
+8. 时间类字段（`appointment_at`，以及模板里 label 含「时间」「日期」的字段）的 `value`
+   必须是 `YYYY-MM-DD`：把「下周三」「明天」这类说法按开头给的今天日期换算成具体日期；
+   算不出具体日期就**不要输出这一条要素**——不许把「下周三」原样当取值。
+9. 第 8 条的 `source_span` 照样是原文里逐字出现的片段（例如「下周三下午再聊」）：
+   `value` 是换算后的日期，`source_span` 是支撑它的原话，两者可以不同。"""
 
 
-def build_sorting_user_prompt(*, content: str, candidates: list[Candidate]) -> str:
-    """拼 user 消息：原文 + （灰区时）归属候选。
+def _today_label(today: str) -> str:
+    """`YYYY-MM-DD` → `2026-11-18（周三）`；不是合法 ISO 日期就原样返回（不猜星期）。"""
+    text = today.strip() if isinstance(today, str) else ""
+    try:
+        day = date.fromisoformat(text)
+    except ValueError:
+        return text
+    return f"{text}（{_WEEKDAYS[day.weekday()]}）"
+
+
+def build_sorting_system_prompt(today: str) -> str:
+    """拼 system 提示：开头写清「今天」是几号星期几，相对日期才换算得出来。
+
+    日期由调用方（用例层）从时钟取；本模块不取时钟，解析不了就只写原串、不猜星期。
+    """
+    return f"今天是 {_today_label(today)}。\n\n" + SORTING_SYSTEM_PROMPT
+
+
+def build_sorting_user_prompt(*, content: str, candidates: list[Candidate], today: str) -> str:
+    """拼 user 消息：原文 + （灰区时）归属候选 + 今天日期。
 
     `candidates` 非空只说明「这票货可能是这几家」，不是结论：模型可以在
     `basis` / `reason` 里参考，但归属由确定性漏斗决定，这里不要求模型改归属。
+    末尾附今天日期：模型换算「下周三」这类相对说法要先知道今天是哪天。
     """
     lines = ["【原文】以下是这次要分拣的原文，`source_span` 只能从这里逐字截取：", content]
     if candidates:
@@ -48,6 +79,7 @@ def build_sorting_user_prompt(*, content: str, candidates: list[Candidate]) -> s
         )
         for index, candidate in enumerate(candidates, start=1):
             lines.append(f"{index}. {candidate.name}（相似度 {candidate.score:.1f}）")
+    lines.extend(["", f"今天日期：{_today_label(today)}"])
     return "\n".join(lines)
 
 

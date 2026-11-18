@@ -9,17 +9,19 @@
 
 ## 本地命令（本项目唯一事实源）
 
-- lint：`ruff check .`
-- test：`pytest -q`
-- 分层检查：`$env:PYTHONPATH='src'; lint-imports`
-- 跑接口：`uvicorn salescopilot.entrypoints.api.app:app --reload`
+- lint：`.venv\Scripts\python.exe -m ruff check .`
+- test：`.venv\Scripts\python.exe -m pytest -q`
+- 分层检查：`$env:PYTHONPATH='src'; .venv\Scripts\lint-imports.exe`
+- 跑接口：`$env:PYTHONPATH='src'; .venv\Scripts\python.exe -m uvicorn salescopilot.entrypoints.api.app:app --reload`
 
 ## 本项目特有约束
 
 - 依赖方向只有 `entrypoints → services → domain`，`adapters` 与 `services` 平级；装配只在 `entrypoints`。
 - 新功能先在 `specs/NNN-短名/` 写 spec + plan + tasks；计划未确认不写代码。
 - 小修小补记 `docs/进度.md` 的 `## 修复记录`，不新开文档。
-<!-- 填写：项目专属的其它红线（数据源、禁改文件、外部服务）；没有就删本行 -->
+- 数据源只来自粘贴 / 文件导入，不做网页或 IM 抓取。
+- 不自动对外发送任何消息；AI 产出必须人确认后才用。
+- 事实与分级的历史表只追加，不 update 业务内容（`decide` / `attach_lead` 属窄更新例外）。
 
 ## 收尾
 
