@@ -95,11 +95,17 @@
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q` 全量绿；`.\.venv\Scripts\python.exe scripts\seed_demo.py` 后按 `docs/演示脚本.md` 走通五入口；`-m pytest -q tests\test_no_industry_words.py`
   - 预估：6h　依赖：T009
   - 实际：`DEFAULT_TEMPLATE` 改一处（前端不再自带默认值，模板下拉留空＝后端决定）；ToB 资料放 `data/knowledge/tob/` 并在演示命令里用 `--docs-dir` 只索引它（假向量否则会把教培资料引到话术里）；`seed_demo.py` 全部走用例路径（`set_manual` / `advance` / `record` / `propose` + `decide`），只有「created_at 往回拨」与「没约下次的那条跟进」是仓储直写并在脚本里注明；`POST /review/answers` 本周重复作答改回 409
+- [x] **[T010.5] 收尾两修：分拣单分级口径一致 + 首屏加载态** 🔒（口径）
+  - 目标：分拣单详情里的分级与客户详情页给同一个答案（都按规则现算），模型自报的那份单独留着备查；首屏「还没请求回来」不再显示成「没有待办」。
+  - 涉及文件：`src/salescopilot/services/sorting.py`、`src/salescopilot/entrypoints/api/app.py`、`web/src/pages/SortingDesk.vue`、`web/src/pages/LeadsShelf.vue`、`web/src/pages/SettingsPage.vue`、`tests/test_sorting_api.py`
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_api.py`；起服务后看分拣单详情与详情页两处档位一致、首屏先出「加载中」再出列表
+  - 预估：2h　依赖：T010
+  - 实际：详情改为 `grading_source=rule` 现算（与 `POST /sorting` / 客户详情同一函数），模型原文那份原样放 `model_grading`；三个页面加 `todoLoaded` / `listsLoaded` / `loaded` 门禁。两处修复的登记见 `docs/进度.md` 修复记录（2026-11-18 后两行）
 
 ## 汇总
 
-- 增量数：**13**（阶段 A 6 个：T001 / T002 / T002b / T002c / T003 / T004；B 2 个；C 2 个；D 3 个：T009a / T009b / T010）
-- 总预估：**80 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 4 + 6），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
+- 增量数：**14**（阶段 A 6 个：T001 / T002 / T002b / T002c / T003 / T004；B 2 个；C 2 个；D 4 个：T009a / T009b / T010 / T010.5）
+- 总预估：**82 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 4 + 6 + 2），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
 - 依赖关系：**T002 → T002b → T003**（阈值先校准、再让分拣链路用上校准值，避免拿拍脑袋的阈值去跑真实投料）；其余依赖不变：T001 → T002 / T005，T003 → T004，T004 + T005 + T006 + T008 → T009a，T009a → T009b → T010。
 - 排序原则：先数据层与迁移（T001，保证后面每一步都有地方落）→ 再按"分拣（含阈值校准）→ 卡片 → 分级 → 出库"的数据依赖推进 → 前端最后接（后端接口定型后再画页面）→ 最后换场并做全量验收。不勾完上一阶段不进下一阶段。
 - 并行机会：T002 与 T005 互不依赖，可并行；T002b 的 50 对标注样本可以提前单独标（纯人工，不占开发工时）；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次——实际落地时拆成了 T009a（导航 / 货架 / 详情）与 T009b（复盘 / 设置 / 导入）两个增量，省掉一次合并。

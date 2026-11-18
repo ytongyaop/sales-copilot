@@ -72,6 +72,9 @@ cd web; npm install; npm run dev      # → http://localhost:5173
 
 三步就是：**建索引 → 播种 → 起服务**（上面的 2 / 3 / 4），顺序换掉会导致第 5 步「生成话术」被拒「未引用资料」。
 
+前端首屏会先显示「加载中…」（不是「没有待办」），约 **0.6 秒**后出数据：页面先问一次 `/health` 再挂载各页，
+所以后端刚起来那几秒也不会停在「0 家」。
+
 ### B. 真模型（需要 `.env` 里的 `DEEPSEEK_API_KEY` 与 `DASHSCOPE_API_KEY`）
 
 ```powershell
@@ -120,7 +123,7 @@ web/              Vue3 + Vite 前端（五个入口），只通过 HTTP 调后�
 
 ```powershell
 .venv\Scripts\python.exe -m ruff check .                     # 全过（0 问题）
-.venv\Scripts\python.exe -m pytest -q                        # 480 passed
+.venv\Scripts\python.exe -m pytest -q                        # 485 passed
 $env:PYTHONPATH='src'; .venv\Scripts\lint-imports.exe        # 3 kept, 0 broken
 .venv\Scripts\python.exe -m pytest -q tests\test_no_industry_words.py   # 引擎不含行业词
 .venv\Scripts\python.exe -m pytest -q tests\test_templates.py            # 四份模板全过校验
