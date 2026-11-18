@@ -74,6 +74,8 @@ def test_extract_fills_missing_lead_fields(tmp_path: Path) -> None:
     lead = leads.get("lead-1")
     assert lead is not None
     assert lead.fields == outcome.field_updates
+    # T001 只加列不填值：这次提炼落库的事实归块全为空（T003 才按字段归块）
+    assert {fact.card_section for fact in outcome.accepted} == {""}
 
 
 def test_existing_value_is_not_overwritten(tmp_path: Path) -> None:
@@ -102,6 +104,8 @@ def test_non_iso_appointment_stays_a_fact_only(tmp_path: Path) -> None:
     # 事实层不按字段格式判：约定时间这条事实照常落库，留给人工补录成 ISO 日期
     fact = facts.get_by_field("lead-1", "appointment_at")
     assert fact is not None and fact.value == "下周一"
+    # 新增的 card_section 默认空字符串（本增量不填值），不是 NULL
+    assert fact.card_section == ""
 
 
 def test_fields_from_facts_ignores_objection() -> None:

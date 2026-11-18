@@ -21,8 +21,11 @@ from salescopilot.domain.models import (
     ExtractRun,
     Fact,
     Followup,
+    GradingRecord,
     Lead,
+    PreferenceSample,
     RawItem,
+    SortingBatch,
     StageEvent,
 )
 
@@ -72,7 +75,8 @@ CREATE TABLE IF NOT EXISTS facts (
     source_span TEXT NOT NULL,
     confidence REAL NOT NULL,
     locked INTEGER NOT NULL,
-    at TEXT NOT NULL
+    at TEXT NOT NULL,
+    card_section TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS extract_runs (
     id TEXT PRIMARY KEY,
@@ -108,6 +112,35 @@ CREATE TABLE IF NOT EXISTS assignment_events (
     reason TEXT NOT NULL,
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sorting_batches (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT,
+    raw_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    suggestion_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    scorer TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_action TEXT
+);
+CREATE TABLE IF NOT EXISTS grading_history (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT NOT NULL,
+    ai_value TEXT,
+    human_value TEXT,
+    reason TEXT,
+    mode TEXT NOT NULL,
+    actor TEXT,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS preference_samples (
+    id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    lead_id TEXT,
+    at TEXT NOT NULL
+);
 """
 
 _LEADS_COLUMNS = (
@@ -129,8 +162,8 @@ _SELECT_ASSIGNMENT = "SELECT id, lead_id, from_owner, to_owner, reason, at FROM 
 _SELECT_FOLLOWUP = "SELECT id, lead_id, conclusion, objection, next_followup_at, at FROM followups"
 _SELECT_RAW = "SELECT id, lead_id, source, content, content_hash, at FROM raw_items"
 _SELECT_FACT = (
-    "SELECT id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at"
-    " FROM facts"
+    "SELECT id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at,"
+    " card_section FROM facts"
 )
 _SELECT_RUN = (
     "SELECT id, raw_id, model, prompt_version, input_hash, output_hash, candidates,"
@@ -140,18 +173,45 @@ _SELECT_DRAFT = (
     "SELECT id, lead_id, text, citations_json, status, model, prompt_version,"
     " token, seconds, created_at FROM drafts"
 )
+_SELECT_SORTING = (
+    "SELECT id, lead_id, raw_id, status, suggestion_json, confidence, scorer, created_at,"
+    " decided_at, decided_action FROM sorting_batches"
+)
+_SELECT_GRADING = (
+    "SELECT id, lead_id, ai_value, human_value, reason, mode, actor, at FROM grading_history"
+)
+_SELECT_PREFERENCE = "SELECT id, question, answer, lead_id, at FROM preference_samples"
 DB_PATH_ENV = "SALESCOPILOT_DB"
 
 
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """把库升到当前 schema：建缺的表，补齐缺的列；重复调用不报错、不重复加列。
+
+    为什么要单独一段而不只跑 `executescript(SCHEMA)`：`CREATE TABLE IF NOT EXISTS`
+    对**已存在的旧表**不会补列，v1 的 `facts` 就永远拿不到 `card_section`。
+    所以列一律走「先查 `PRAGMA table_info`，缺了才 `ALTER TABLE ADD COLUMN`」。
+    只加不删、不改类型：旧数据原样保留，迁移可反复执行。
+    """
+    conn.executescript(SCHEMA)
+    _ensure_column(conn, "facts", "card_section", "TEXT NOT NULL DEFAULT ''")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """表上缺这一列才加；表名/列名只来自本模块常量，不拼外部输入。"""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 class _SqliteRepository:
-    """三个仓储的共同底座：建表只做一次，之后每次操作各开一个短连接。"""
+    """各仓储的共同底座：升 schema 只做一次，之后每次操作各开一个短连接。"""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = self._connect()
         try:
-            conn.executescript(SCHEMA)
+            _ensure_schema(conn)
             conn.commit()
         finally:
             conn.close()
@@ -411,8 +471,9 @@ class SqliteFactRepository(_SqliteRepository):
         with self._open() as conn:
             conn.execute(
                 "INSERT INTO facts "
-                "(id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, lead_id, raw_id, field, value, source, source_span, confidence, locked, at,"
+                " card_section) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     fact.id,
                     fact.lead_id,
@@ -424,6 +485,7 @@ class SqliteFactRepository(_SqliteRepository):
                     fact.confidence,
                     1 if fact.locked else 0,
                     fact.at,
+                    fact.card_section,
                 ),
             )
 
@@ -445,15 +507,16 @@ class SqliteFactRepository(_SqliteRepository):
         return None if row is None else self._to_fact(row)
 
     def update(self, fact: Fact) -> None:
-        """整条改（值 / 原文编号 / 来源 / 片段 / 置信度 / 锁定 / 时间）；按 id 定位。
+        """整条改（值 / 原文编号 / 来源 / 片段 / 置信度 / 锁定 / 归块 / 时间）；按 id 定位。
 
         `raw_id` 必须一起改：一条字段的「当前事实」换了出处，追溯就要指到新的那条原文；
         漏掉它会让 UI 与账本对不上「这个值到底是哪段话提炼出来的」。
+        `card_section` 同理：归块是这条事实的一部分，不写回就会在改值后凭空丢掉。
         """
         with self._open() as conn:
             conn.execute(
                 "UPDATE facts SET raw_id = ?, value = ?, source = ?, source_span = ?, "
-                "confidence = ?, locked = ?, at = ? WHERE id = ?",
+                "confidence = ?, locked = ?, card_section = ?, at = ? WHERE id = ?",
                 (
                     fact.raw_id,
                     fact.value,
@@ -461,6 +524,7 @@ class SqliteFactRepository(_SqliteRepository):
                     fact.source_span,
                     fact.confidence,
                     1 if fact.locked else 0,
+                    fact.card_section,
                     fact.at,
                     fact.id,
                 ),
@@ -479,6 +543,7 @@ class SqliteFactRepository(_SqliteRepository):
             confidence=row["confidence"],
             locked=bool(row["locked"]),
             at=row["at"],
+            card_section=row["card_section"] or "",
         )
 
 
@@ -598,6 +663,132 @@ class SqliteDraftRepository(_SqliteRepository):
             seconds=row["seconds"],
             created_at=row["created_at"],
         )
+
+
+class SqliteSortingBatchRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `SortingBatchRepository` 的 SQLite 实现（只追加）。
+
+    `suggestion_json` 原样进、原样出：不解析、不重新序列化，审计才对得上
+    「模型当时吐出的那串文本」。处置列（`decided_*`）本层不提供改写入口。
+    """
+
+    def add(self, batch: SortingBatch) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO sorting_batches "
+                "(id, lead_id, raw_id, status, suggestion_json, confidence, scorer, created_at, "
+                "decided_at, decided_action) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch.id,
+                    batch.lead_id,
+                    batch.raw_id,
+                    batch.status,
+                    batch.suggestion_json,
+                    batch.confidence,
+                    batch.scorer,
+                    batch.created_at,
+                    batch.decided_at,
+                    batch.decided_action,
+                ),
+            )
+
+    def get(self, batch_id: str) -> SortingBatch | None:
+        with self._open() as conn:
+            row = conn.execute(f"{_SELECT_SORTING} WHERE id = ?", (batch_id,)).fetchone()
+        return None if row is None else self._to_batch(row)
+
+    def list_by_status(self, status: str) -> list[SortingBatch]:
+        """按状态回查（待认领池 = `pending_claim`），按时间正序、同秒按写入顺序。"""
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_SORTING} WHERE status = ? ORDER BY created_at ASC, rowid ASC",
+                (status,),
+            ).fetchall()
+        return [self._to_batch(row) for row in rows]
+
+    @staticmethod
+    def _to_batch(row: sqlite3.Row) -> SortingBatch:
+        return SortingBatch(
+            id=row["id"],
+            raw_id=row["raw_id"],
+            status=row["status"],
+            suggestion_json=row["suggestion_json"],
+            confidence=row["confidence"],
+            scorer=row["scorer"],
+            created_at=row["created_at"],
+            lead_id=row["lead_id"],
+            decided_at=row["decided_at"],
+            decided_action=row["decided_action"],
+        )
+
+
+class SqliteGradingRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `GradingRepository` 的 SQLite 实现（只追加）。"""
+
+    def add(self, record: GradingRecord) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO grading_history "
+                "(id, lead_id, ai_value, human_value, reason, mode, actor, at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.id,
+                    record.lead_id,
+                    record.ai_value,
+                    record.human_value,
+                    record.reason,
+                    record.mode,
+                    record.actor,
+                    record.at,
+                ),
+            )
+
+    def list_for(self, lead_id: str) -> list[GradingRecord]:
+        with self._open() as conn:
+            rows = conn.execute(
+                f"{_SELECT_GRADING} WHERE lead_id = ? ORDER BY at ASC, rowid ASC",
+                (lead_id,),
+            ).fetchall()
+        return [
+            GradingRecord(
+                id=row["id"],
+                lead_id=row["lead_id"],
+                ai_value=row["ai_value"],
+                human_value=row["human_value"],
+                reason=row["reason"],
+                mode=row["mode"],
+                actor=row["actor"],
+                at=row["at"],
+            )
+            for row in rows
+        ]
+
+
+class SqlitePreferenceSampleRepository(_SqliteRepository):
+    """`domain/ports.py` 的 `PreferenceSampleRepository` 的 SQLite 实现（只追加）。"""
+
+    def add(self, sample: PreferenceSample) -> None:
+        with self._open() as conn:
+            conn.execute(
+                "INSERT INTO preference_samples (id, question, answer, lead_id, at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (sample.id, sample.question, sample.answer, sample.lead_id, sample.at),
+            )
+
+    def list_all(self) -> list[PreferenceSample]:
+        with self._open() as conn:
+            rows = conn.execute(f"{_SELECT_PREFERENCE} ORDER BY at ASC, rowid ASC").fetchall()
+        return [
+            PreferenceSample(
+                id=row["id"],
+                question=row["question"],
+                answer=row["answer"],
+                at=row["at"],
+                lead_id=row["lead_id"],
+            )
+            for row in rows
+        ]
 
 
 def default_db_path() -> Path:

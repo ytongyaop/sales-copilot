@@ -20,6 +20,7 @@ data/*
 !data/seed/
 !data/evalsets/
 data/index/
+data/backup/
 *.sqlite3
 
 # 其它

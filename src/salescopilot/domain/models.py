@@ -21,6 +21,28 @@ ALLOWED_OBJECTIONS: tuple[str, ...] = ("price", "time", "effect", "trust", "othe
 # 归属变更原因：为什么这条线索换了/没了归属人；扩展枚举同样只改这里。
 ALLOWED_ASSIGNMENT_REASONS: tuple[str, ...] = ("claim", "release", "auto_reclaim", "manual")
 
+# 信息卡四要素：一条事实属于哪一块。顺序即展示顺序：
+# basic（基础信息）/ needs（需求与痛点）/ decision（决策流程与预算）/ followup（跟进记录）。
+# 扩展枚举只改这里；v1 的事实一律留空，含义是「还没归块」，不是「不属于任何块」。
+CARD_SECTIONS: tuple[str, ...] = ("basic", "needs", "decision", "followup")
+
+# 分拣单状态：只追加流水上的状态标记，状态怎么流转由用例层判定。
+SORTING_STATUSES: tuple[str, ...] = (
+    "pending_review",
+    "pending_claim",
+    "accepted",
+    "rejected",
+)
+
+# 归属判定的打分者：确定性漏斗三级 + 模型复核 + 人工 + 未判定。
+SORTING_SCORERS: tuple[str, ...] = ("exact", "fuzzy", "vector", "llm", "review", "none")
+
+# 分拣单的处置动作：只追加留痕，不覆盖原建议。
+SORTING_DECISIONS: tuple[str, ...] = ("accepted", "fixed_and_accepted", "rejected")
+
+# 分级写入的两种模式：先提议后确认（propose）/ 直接定（auto）。
+GRADING_MODES: tuple[str, ...] = ("propose", "auto")
+
 # 可以人工补录 / 由提炼自动补齐的线索字段：只取块契约 `requires` 里出现过的字段名，
 # 不自造新字段（扩展要改这里，不要在别处另写一份白名单）。
 EDITABLE_LEAD_FIELDS: tuple[str, ...] = (
@@ -120,7 +142,9 @@ class Fact:
 
     - `source`：谁产出的——`llm`（模型提炼）、`manual`（人工改）、`rule`（规则推导）；
     - `source_span`：原文片段，必须非空（无原文出处的候选不允许落库）；
-    - `locked`：人工锁定后，后续提炼一律跳过该字段。
+    - `locked`：人工锁定后，后续提炼一律跳过该字段；
+    - `card_section`：这条事实归信息卡哪一块，取 `CARD_SECTIONS`；空字符串表示
+      「尚未归块」（v1 的全部事实都是空），不是非法值。
     """
 
     id: str
@@ -133,6 +157,7 @@ class Fact:
     confidence: float
     locked: bool
     at: str
+    card_section: str = ""
 
 
 @dataclass(frozen=True)
@@ -204,3 +229,56 @@ class Draft:
     token: int
     seconds: float
     created_at: str
+
+
+@dataclass(frozen=True)
+class SortingBatch:
+    """一张分拣单（只追加）：投料原文、归属建议、置信度与「是谁判的」。
+
+    - `lead_id`：归属未定时为 None（进待认领池，之后由人认领）；`status` 取
+      `SORTING_STATUSES`，流转由用例层判定；
+    - `suggestion_json`：四类判断的原始建议，按**原样 JSON 字符串**整段保存——
+      审计要的是「当时到底吐了什么」，所以这里不解析、也不重新序列化；
+    - `decided_at` / `decided_action`：人工处置留痕，动作取 `SORTING_DECISIONS`。
+      处置只写这两列，不改原建议。
+    """
+
+    id: str
+    raw_id: str
+    status: str
+    suggestion_json: str
+    confidence: float
+    scorer: str
+    created_at: str
+    lead_id: str | None = None
+    decided_at: str | None = None
+    decided_action: str | None = None
+
+
+@dataclass(frozen=True)
+class GradingRecord:
+    """一次分级的留痕（只追加）：AI 值、人工值、改判原因、模式、操作者与时间。
+
+    `mode` 取 `GRADING_MODES`；`ai_value` / `human_value` 都允许为空——直接定模式下
+    没有「AI 提议值」，人工首次定级时也没有「人工改的值」。
+    """
+
+    id: str
+    lead_id: str
+    mode: str
+    at: str
+    ai_value: str | None = None
+    human_value: str | None = None
+    reason: str | None = None
+    actor: str | None = None
+
+
+@dataclass(frozen=True)
+class PreferenceSample:
+    """一条偏好样本（只追加）：周复盘里「问一句 → 业主怎么答」，用于后续校准。"""
+
+    id: str
+    question: str
+    answer: str
+    at: str
+    lead_id: str | None = None

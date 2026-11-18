@@ -14,8 +14,11 @@ from salescopilot.domain.models import (
     ExtractRun,
     Fact,
     Followup,
+    GradingRecord,
     Lead,
+    PreferenceSample,
     RawItem,
+    SortingBatch,
     StageEvent,
 )
 
@@ -124,6 +127,36 @@ class DraftGenerator(Protocol):
     """
 
     def draft(self, *, lead: Lead, facts: list[Fact], hits: list[dict]) -> DraftResult: ...
+
+
+class SortingBatchRepository(Protocol):
+    """分拣单端口：只追加、按 id 查单条、按状态回查（待认领池 = `status='pending_claim'`）。
+
+    **故意没有 update / delete**：分拣单是审计流水，人工处置也只在流水上另记，
+    不改写已经落库的那一行。
+    """
+
+    def add(self, batch: SortingBatch) -> None: ...
+
+    def get(self, batch_id: str) -> SortingBatch | None: ...
+
+    def list_by_status(self, status: str) -> list[SortingBatch]: ...
+
+
+class GradingRepository(Protocol):
+    """分级留痕端口：只追加、按线索按时间正序回查（AI 值 / 人工值 / 原因都在这里）。"""
+
+    def add(self, record: GradingRecord) -> None: ...
+
+    def list_for(self, lead_id: str) -> list[GradingRecord]: ...
+
+
+class PreferenceSampleRepository(Protocol):
+    """偏好样本端口：只追加、按时间正序全量回查（周复盘的历史作答）。"""
+
+    def add(self, sample: PreferenceSample) -> None: ...
+
+    def list_all(self) -> list[PreferenceSample]: ...
 
 
 class Embedder(Protocol):
