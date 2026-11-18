@@ -268,6 +268,9 @@ class SortingBatch:
       审计要的是「当时到底吐了什么」，所以这里不解析、也不重新序列化；
     - `dropped_json`：投料时被丢弃的要素诊断（JSON 数组，每项 `{"index", "reason"}`），
       与 `suggestion_json` 一样按原样字符串保存；
+    - `candidates_json`：投料时归属漏斗给出的候选（JSON 数组，每项
+      `{"lead_id", "name", "score", "scorer"}`）；没有候选就是 `"[]"`。
+      落库是为了列表之外的单条视图能回看「当时系统觉得像谁」；
     - `decided_at` / `decided_action`：人工处置留痕，动作取 `SORTING_DECISIONS`。
       处置只写这两列（外加状态），不改原建议。
     """
@@ -283,6 +286,7 @@ class SortingBatch:
     decided_at: str | None = None
     decided_action: str | None = None
     dropped_json: str = "[]"
+    candidates_json: str = "[]"
 
 
 @dataclass(frozen=True)

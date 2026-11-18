@@ -754,10 +754,12 @@ def _suggestion_body(suggestion: SortingSuggestion | None) -> dict | None:
 
 @app.post("/sorting", status_code=201)
 def submit_sorting(payload: SortingIn, service: SortingDep):
-    """一次投料 → 一张分拣单：201 返回归属 / 要素 / 分级 / 出库四块与丢弃记录。
+    """一次投料 → 一张分拣单：201 返回归属 / 要素 / 分级 / 出库四块、归属候选与丢弃记录。
 
     归属：传了 `lead_id` 就是它；没传则跑三级漏斗，只有精确键命中才自动归属，
     灰区与新客户一律进待认领池（`status=pending_claim`，`lead_id` 为 null）。
+    `lead_candidates` 是这次落库的候选（`[{"lead_id","name","score","scorer"}]`），
+    与 `GET /sorting/batches/{id}` 回的是同一份，没有候选就是 `[]`。
     原文不合格、模型失败或没有任何可用要素时 422（线索不存在 404），不生成分拣单。
     """
     outcome = service.sort(content=payload.content, source=payload.source, lead_id=payload.lead_id)
@@ -774,6 +776,7 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
         "scorer": batch.scorer,
         "created_at": batch.created_at,
         "suggestion": _suggestion_body(outcome.suggestion),
+        "lead_candidates": outcome.lead_candidates,
         "dropped": outcome.dropped,
     }
 
@@ -782,7 +785,8 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
 def list_sorting_batches(service: SortingDep, status: str | None = None, limit: int = 50):
     """分拣单列表（新→旧）：`status` 可过滤（如 `pending_claim` 即待认领池）。
 
-    每条带 `lead_name`（归属未定时为 null）与 `dropped_count`（丢了几条要素，整数）；
+    每条带 `lead_name`（归属未定时为 null）、`dropped_count`（丢了几条要素，整数）
+    与 `content_preview`（原文前 60 字，超出加 `…`）；
     状态不认识或 `limit` 越界时 422。
     """
     items, issues = service.list_batches(status=status, limit=limit)
@@ -793,8 +797,8 @@ def list_sorting_batches(service: SortingDep, status: str | None = None, limit: 
 
 @app.get("/sorting/batches/{batch_id}")
 def get_sorting_batch(batch_id: str, service: SortingDep):
-    """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）
-    与投料时的丢弃诊断（`dropped`）。"""
+    """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）、
+    投料原文全文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。"""
     body, issues = service.get_batch(batch_id)
     if body is None:
         return JSONResponse(status_code=404, content=_issue_body(issues))

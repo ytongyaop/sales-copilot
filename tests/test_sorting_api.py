@@ -15,6 +15,13 @@ from salescopilot.entrypoints.api.app import app
 LEAD = {"name": "华远建设有限公司", "contact": "13800001111", "source": "referral"}
 PHONE_CONTENT = "13800001111 那边说预算三十万，下周一下午再聊"
 NEW_CONTENT = "完全不相干的一通闲聊，预算还在谈，下周再说"
+# 超过 60 字的长原文：验列表摘要的截断（60 字 + 「…」）。
+LONG_CONTENT = (
+    "华远建设有限公司的刘经理说，下周一上午十点方便再聊一次，预算大概三十万左右，"
+    "重点是想把三个班先排出来，后面再看要不要扩班，负责人是张校长，联系方式 13800002222"
+)
+# 名字与已有客户只差两个字：走字符相似（灰区），归属候选非空。
+FUZZY_CONTENT = "华远建设工程有限公司那边说预算四十万，下周三再联系张校长"
 
 
 @pytest.fixture
@@ -148,6 +155,56 @@ def test_get_unknown_batch_404(client: TestClient) -> None:
 
     assert response.status_code == 404
     assert response.json()["issues"][0]["location"] == "batch_id"
+
+
+def test_list_batches_carries_truncated_content_preview(client: TestClient) -> None:
+    """列表每条带 `content_preview`：原文前 60 字，超出补 `…`。"""
+    lead_id = _lead_id(client)
+    _sort(client, LONG_CONTENT, lead_id)
+
+    response = client.get("/sorting/batches")
+
+    assert response.status_code == 200, response.text
+    items = response.json()
+    assert len(items) == 1
+    assert len(LONG_CONTENT) > 60
+    assert items[0]["content_preview"] == LONG_CONTENT[:60] + "…"
+    # 列表不背全文：候选与原文都只在单条接口里。
+    assert "content" not in items[0]
+    assert "lead_candidates" not in items[0]
+
+
+def test_get_single_batch_carries_content_and_lead_candidates(client: TestClient) -> None:
+    """单条：带完整原文（`content`）与归属候选（`lead_candidates`），投料响应同口径。"""
+    lead_id = _lead_id(client)
+
+    created = _sort(client, FUZZY_CONTENT)
+    assert created.status_code == 201, created.text
+    body = created.json()
+
+    response = client.get(f"/sorting/batches/{body['batch_id']}")
+    assert response.status_code == 200, response.text
+    detail = response.json()
+
+    assert detail["content"] == FUZZY_CONTENT
+    assert detail["lead_candidates"]
+    assert detail["lead_candidates"][0]["lead_id"] == lead_id
+    assert set(detail["lead_candidates"][0]) == {"lead_id", "name", "score", "scorer"}
+    # 投料响应与单条视图回的是同一份候选（前端不用两套口径）。
+    assert body["lead_candidates"] == detail["lead_candidates"]
+
+
+def test_batch_without_candidates_returns_empty_list(client: TestClient) -> None:
+    """没有任何线索时投料：`lead_candidates` 是 `[]`，不是 null、也不是缺字段。"""
+    created = _sort(client, NEW_CONTENT)
+    assert created.status_code == 201, created.text
+    body = created.json()
+
+    response = client.get(f"/sorting/batches/{body['batch_id']}")
+    assert response.status_code == 200, response.text
+
+    assert body["lead_candidates"] == []
+    assert response.json()["lead_candidates"] == []
 
 
 def test_bad_parameters_are_422(client: TestClient) -> None:

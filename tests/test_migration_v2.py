@@ -56,6 +56,23 @@ CREATE TABLE facts (
 
 NEW_TABLES = ("sorting_batches", "grading_history", "preference_samples")
 
+# T003 形态的分拣单表：有 `dropped_json`，还没有 `candidates_json`。
+SORTING_V1_SCHEMA = """
+CREATE TABLE sorting_batches (
+    id TEXT PRIMARY KEY,
+    lead_id TEXT,
+    raw_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    suggestion_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    scorer TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_action TEXT,
+    dropped_json TEXT NOT NULL DEFAULT '[]'
+);
+"""
+
 
 def _make_v1_db(path: Path) -> None:
     """手工造一个 v1 库：1 条线索 + 1 条事实，字段值与 v1 完全一致。"""
@@ -160,6 +177,41 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     assert _columns(db, "facts").count("card_section") == 1
     assert _count(db, "facts") == 1
     assert set(NEW_TABLES) <= _table_names(db)
+
+
+def test_old_sorting_table_gets_candidates_json_once(tmp_path: Path) -> None:
+    """旧分拣单表（没有 `candidates_json`）补列：旧数据保留，跑两次列也只加一个。"""
+    db = tmp_path / "old_sorting.sqlite3"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(SORTING_V1_SCHEMA)
+        conn.execute(
+            "INSERT INTO sorting_batches (id, lead_id, raw_id, status, suggestion_json,"
+            " confidence, scorer, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "batch-old",
+                None,
+                "raw-old",
+                "pending_claim",
+                '{"elements": []}',
+                0.5,
+                "fuzzy",
+                "2026-11-18T09:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    SqliteSortingBatchRepository(db)
+    SqliteSortingBatchRepository(db)  # 第二次初始化：不报错，也不重复加列
+
+    assert _columns(db, "sorting_batches").count("candidates_json") == 1
+    batch = SqliteSortingBatchRepository(db).get("batch-old")
+    assert batch is not None
+    assert batch.suggestion_json == '{"elements": []}'
+    # 旧行没有候选：迁移后是空数组字符串，不是 NULL、也不是被猜出来的候选
+    assert batch.candidates_json == "[]"
 
 
 def test_card_sections_contract() -> None:

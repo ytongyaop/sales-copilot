@@ -124,7 +124,8 @@ CREATE TABLE IF NOT EXISTS sorting_batches (
     created_at TEXT NOT NULL,
     decided_at TEXT,
     decided_action TEXT,
-    dropped_json TEXT NOT NULL DEFAULT '[]'
+    dropped_json TEXT NOT NULL DEFAULT '[]',
+    candidates_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS grading_history (
     id TEXT PRIMARY KEY,
@@ -177,7 +178,7 @@ _SELECT_DRAFT = (
 )
 _SELECT_SORTING = (
     "SELECT id, lead_id, raw_id, status, suggestion_json, confidence, scorer, created_at,"
-    " decided_at, decided_action, dropped_json FROM sorting_batches"
+    " decided_at, decided_action, dropped_json, candidates_json FROM sorting_batches"
 )
 _SELECT_GRADING = (
     "SELECT id, lead_id, ai_value, human_value, reason, mode, actor, at FROM grading_history"
@@ -198,6 +199,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "facts", "card_section", "TEXT NOT NULL DEFAULT ''")
     # T004：分拣时的丢弃诊断也要能回看，旧库（T001–T003 造的）缺这一列就在这里补上。
     _ensure_column(conn, "sorting_batches", "dropped_json", "TEXT NOT NULL DEFAULT '[]'")
+    # 归属候选落库：列表之外的单条视图要能回看「当时系统觉得像谁」。
+    _ensure_column(conn, "sorting_batches", "candidates_json", "TEXT NOT NULL DEFAULT '[]'")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -684,8 +687,8 @@ class SqliteSortingBatchRepository(_SqliteRepository):
             conn.execute(
                 "INSERT INTO sorting_batches "
                 "(id, lead_id, raw_id, status, suggestion_json, confidence, scorer, created_at, "
-                "decided_at, decided_action, dropped_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "decided_at, decided_action, dropped_json, candidates_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     batch.id,
                     batch.lead_id,
@@ -698,6 +701,7 @@ class SqliteSortingBatchRepository(_SqliteRepository):
                     batch.decided_at,
                     batch.decided_action,
                     batch.dropped_json,
+                    batch.candidates_json,
                 ),
             )
 
@@ -762,6 +766,7 @@ class SqliteSortingBatchRepository(_SqliteRepository):
             decided_at=row["decided_at"],
             decided_action=row["decided_action"],
             dropped_json=row["dropped_json"],
+            candidates_json=row["candidates_json"],
         )
 
 

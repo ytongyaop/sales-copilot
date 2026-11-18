@@ -75,6 +75,9 @@ GRADING_VALUES = ("A", "B", "C")
 # 列表接口的条数上限：够一屏，也挡得住「一次拉全表」。
 MAX_BATCH_LIMIT = 200
 
+# 列表里的原文摘要长度：够认出是哪一通，又不用把全文塞进列表。
+CONTENT_PREVIEW_LEN = 60
+
 # 归属打分者的固定取值：投料时直接指定线索记 exact（等同精确键），其余按漏斗结论。
 DESIGNATED_SCORER = "exact"
 
@@ -105,13 +108,16 @@ class SortingOutcome:
       或没有任何可用要素可供出库建议），此时 `issues` 说明原因；
     - `suggestion` 是**已校验**的三块建议（要素已过滤、分级已兜底、出库建议已重算），
       与 `batch.suggestion_json`（模型原文）刻意不同：一个给人看，一个给审计看；
-    - `dropped` 每项形如 `{"index", "reason"}`，`index` 是模型输出里的下标。
+    - `dropped` 每项形如 `{"index", "reason"}`，`index` 是模型输出里的下标；
+    - `lead_candidates` 是这次落库的归属候选（`batch.candidates_json` 的同一份内容，
+      已是 `{"lead_id", "name", "score", "scorer"}` 字典）；路由直接回给前端，不用再解析 JSON。
     """
 
     batch: SortingBatch | None
     issues: list[ValidationIssue]
     suggestion: SortingSuggestion | None = None
     dropped: list[dict] = field(default_factory=list)
+    lead_candidates: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -212,6 +218,7 @@ class SortingService:
             resolved_id: str | None = designated.id
         else:
             decision, candidates, resolved_id = self._attribute(raw.content)
+        candidate_payload = _candidate_dicts(candidates)
 
         # 3) 分拣模型：候选只在灰区交给它参考（精确键命中 / 判为新客户都不问归属）。
         prompt_candidates = candidates if decision.band == "review" else []
@@ -259,6 +266,7 @@ class SortingService:
             scorer=decision.scorer,
             created_at=self._clock(),
             dropped_json=json.dumps(dropped, ensure_ascii=False),
+            candidates_json=json.dumps(candidate_payload, ensure_ascii=False),
         )
         self._batches.add(batch)
 
@@ -268,7 +276,7 @@ class SortingService:
             grading=grading,
             next_action=next_action,
         )
-        return SortingOutcome(batch, [], suggestion, dropped)
+        return SortingOutcome(batch, [], suggestion, dropped, candidate_payload)
 
     # -------------------------------------------------------------- 归属漏斗
 
@@ -608,8 +616,9 @@ class SortingService:
     def list_batches(
         self, *, status: str | None = None, limit: int = 50
     ) -> tuple[list[dict], list[ValidationIssue]]:
-        """分拣单列表（倒序）：可按状态过滤；每条带 `lead_name`（归属未定时为空）
-        与 `dropped_count`（投料时被丢弃的要素条数，供列表标「有丢弃」）。"""
+        """分拣单列表（倒序）：可按状态过滤；每条带 `lead_name`（归属未定时为空）、
+        `dropped_count`（投料时被丢弃的要素条数，供列表标「有丢弃」）与
+        `content_preview`（原文前 60 字，超出加 `…`；原文缺失或为空就是空串）。"""
         issues: list[ValidationIssue] = []
         if (
             isinstance(limit, bool)
@@ -647,23 +656,29 @@ class SortingService:
             # 列表只多一个「丢了几条」的整数：诊断正文留给单条接口，列表不必背着全文；
             # 解析失败按 0（复用 `_loads_items` 的口径），一条坏 JSON 不该拖垮整页列表。
             body["dropped_count"] = len(_loads_items(item.dropped_json))
+            # 原文摘要同理：列表只给前 60 字够认单，全文留给单条接口。
+            raw = self._raws.get(item.raw_id)
+            body["content_preview"] = _preview(raw.content if raw is not None else "")
             items.append(body)
         return items, []
 
     def get_batch(self, batch_id: str) -> tuple[dict | None, list[ValidationIssue]]:
-        """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）
-        与投料时的丢弃诊断（`dropped`）。"""
+        """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）、
+        投料原文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。"""
         batch = self._batches.get(batch_id)
         if batch is None:
             return None, [ValidationIssue("batch_id", "分拣单不存在")]
 
         lead = self._leads.get(batch.lead_id) if batch.lead_id else None
+        raw = self._raws.get(batch.raw_id)
         body = _summary(batch, lead.name if lead is not None else None)
         body.update(
             {
                 "raw_id": batch.raw_id,
+                "content": raw.content if raw is not None else "",
                 "suggestion_json": batch.suggestion_json,
                 "suggestion": _loads(batch.suggestion_json),
+                "lead_candidates": _loads_items(batch.candidates_json),
                 "dropped": _loads_items(batch.dropped_json),
             }
         )
@@ -687,6 +702,27 @@ def _summary(batch: SortingBatch, lead_name: str | None) -> dict:
         "decided_at": batch.decided_at,
         "decided_action": batch.decided_action,
     }
+
+
+def _candidate_dicts(candidates: list[Candidate]) -> list[dict]:
+    """把归属漏斗的候选翻成落库/回传的固定形状：`{"lead_id", "name", "score", "scorer"}`。"""
+    return [
+        {
+            "lead_id": item.lead_id,
+            "name": item.name,
+            "score": item.score,
+            "scorer": item.scorer,
+        }
+        for item in candidates
+    ]
+
+
+def _preview(content: str, *, limit: int = CONTENT_PREVIEW_LEN) -> str:
+    """原文摘要：前 `limit` 字，超出补 `…`；空内容给空串（不拿占位文字冒充原文）。"""
+    text = content if isinstance(content, str) else ""
+    if not text:
+        return ""
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def _dropped(diagnostics: list[str]) -> list[dict]:

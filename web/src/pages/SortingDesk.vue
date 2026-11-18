@@ -74,8 +74,6 @@ const panel = ref({ id: '', mode: '' })
 const reviewInfo = ref({})
 const claimPick = ref({})
 const createPick = ref({})
-// 本次会话投过的原文：列表接口不返回正文，只有自己投的才拿得到摘要。
-const contentCache = ref({})
 
 const suggestion = computed(() => (card.value ? card.value.suggestion : null))
 const confidenceText = computed(() =>
@@ -108,13 +106,25 @@ function formatTime(iso) {
   return iso.replace('T', ' ').slice(0, 16)
 }
 
-// 待认领池的摘要：列表接口只给状态与归属，正文要从本次投料里找；
-// 找不到就如实说明不可用，不拿别的字段凑一段假的「原文」。
+// 待认领池的摘要：列表接口已经带 `content_preview`（原文前 60 字）；
+// 老接口/脏数据没给就如实说明不可用，不拿别的字段凑一段假的「原文」。
 function preview(item) {
-  const text = contentCache.value[item.id]
-  if (!text) return '原文摘要暂不可用（列表接口未返回正文）'
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
+  if (item.content_preview) return item.content_preview
+  return '原文摘要暂不可用'
+}
+
+// -------------------------------------------------------------- URL 回放
+
+// 刷新后回放靠 `?batch=<id>`：只读写查询串，不引路由（前端没有路由，页面切换靠 props）。
+function batchIdFromUrl() {
+  return new URLSearchParams(window.location.search).get('batch')
+}
+
+function setUrlBatch(batchId) {
+  const url = new URL(window.location.href)
+  if (batchId) url.searchParams.set('batch', batchId)
+  else url.searchParams.delete('batch')
+  window.history.replaceState({}, '', url)
 }
 
 async function loadHealth() {
@@ -158,10 +168,12 @@ async function submit() {
     })
     // 投料响应不带客户名：再取一次单条视图，卡片与列表用同一份口径。
     card.value = await getBatch(created.batch_id)
-    contentCache.value = { ...contentCache.value, [created.batch_id]: content.value }
-    content.value = ''
+    cardResult.value = null
     fixPanel.value = false
     rejectPanel.value = false
+    // 把这次的单写进 URL：刷新后还能把这张单原样捧回来。
+    setUrlBatch(created.batch_id)
+    content.value = ''
     await loadLists()
   } catch (err) {
     error.value = err.message
@@ -306,10 +318,34 @@ function createLeadAndClaim(item) {
   return claimItem(item, { create_name: name }, `已按「${name}」新建客户并认领`)
 }
 
+// -------------------------------------------------------------- 从列表回放一张单
+
+// 最近分拣单的行点一下：取单条视图（带完整原文、归属候选、丢弃诊断）渲染进上方卡片。
+async function openBatch(batchId) {
+  if (!batchId) return
+  busy.value = `open:${batchId}`
+  error.value = ''
+  notice.value = ''
+  try {
+    card.value = await getBatch(batchId)
+    cardResult.value = null
+    fixPanel.value = false
+    rejectPanel.value = false
+    setUrlBatch(batchId)
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    busy.value = ''
+  }
+}
+
 onMounted(async () => {
   await loadHealth()
   await loadLeads()
   await loadLists()
+  // URL 带 `?batch=<id>` 就把那张单捧回来；没有就保持空态。
+  const initial = batchIdFromUrl()
+  if (initial) await openBatch(initial)
 })
 
 // 切回分拣台时重取客户与列表：客户可能刚在「线索」页新建/改过，
@@ -373,11 +409,26 @@ watch(
         <span class="muted">置信度 {{ confidenceText }}</span>
       </div>
 
+      <div v-if="card.content" class="raw">
+        <h3>投料原文</h3>
+        <p class="raw-text">{{ card.content }}</p>
+      </div>
+
       <div class="judge">
         <section class="block">
           <h3>归属</h3>
           <p v-if="card.lead_name">命中客户：{{ card.lead_name }}</p>
           <p v-else class="muted">没有确定归属：系统没有把握，先到下面「待认领池」认领</p>
+          <template v-if="card.lead_candidates && card.lead_candidates.length">
+            <p class="muted">归属候选：</p>
+            <ul class="candidates">
+              <li v-for="item in card.lead_candidates" :key="item.lead_id">
+                {{ item.name }}
+                <span class="muted">{{ Number(item.score).toFixed(1) }} · {{ item.scorer }}</span>
+              </li>
+            </ul>
+          </template>
+          <p v-else class="muted">没有候选</p>
         </section>
 
         <section class="block">
@@ -583,7 +634,14 @@ watch(
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in recent" :key="item.id">
+          <tr
+            v-for="item in recent"
+            :key="item.id"
+            class="clickable"
+            :class="{ active: card && card.id === item.id }"
+            title="点击把这张单放回上面的卡片"
+            @click="openBatch(item.id)"
+          >
             <td>{{ formatTime(item.created_at) }}</td>
             <td><span class="status" :class="item.status">{{ statusLabel(item.status) }}</span></td>
             <td>{{ item.lead_name || '未认出' }}</td>
@@ -845,5 +903,51 @@ watch(
 .badge.warn {
   background: #fff3e0;
   color: #b35900;
+}
+
+/* 投料原文：保留换行，读的时候不把几段话糊成一行。 */
+.raw {
+  padding: 10px 0;
+  border-bottom: 1px solid #eef1f4;
+}
+
+.raw h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #57606a;
+  font-weight: 600;
+}
+
+.raw-text {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  background: #f6f8fa;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 归属候选：名称在前，分数与打分者是注解，不抢视线。 */
+.candidates {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+/* 可回放的分拣单行：给个手型 + 悬停底色，点起来不像「点不动」。 */
+tr.clickable {
+  cursor: pointer;
+}
+
+tr.clickable:hover {
+  background: #f6f8fa;
+}
+
+tr.clickable.active {
+  background: #eef4ff;
 }
 </style>
