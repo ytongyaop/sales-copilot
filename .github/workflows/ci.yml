@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: Python (lint / test / layering)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: python -m ruff check .
+
+      # 全部用例默认用假模型（FakeLLM / FakeEmbedder），CI 不联网、不调真模型。
+      - name: Test
+        run: python -m pytest -q
+
+      # import-linter 的控制台脚本叫 lint-imports（与本地 .venv\Scripts\lint-imports.exe 同一个）。
+      - name: Layer contracts
+        run: PYTHONPATH=src lint-imports
+
+  web:
+    name: Web (build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build

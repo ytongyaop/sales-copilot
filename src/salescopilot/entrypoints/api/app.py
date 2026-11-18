@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from salescopilot import __version__
 from salescopilot.domain.blocks import BLOCKS
 from salescopilot.domain.card import Card
 from salescopilot.domain.dashboard import Dashboard
@@ -73,7 +74,7 @@ from salescopilot.services.shelf import ShelfService
 from salescopilot.services.sorting import GRADING_SOURCE_RULE, SortingService
 from salescopilot.services.todo import TodoService
 
-app = FastAPI(title="SalesCopilot", version="0.1.0")
+app = FastAPI(title="SalesCopilot", version=__version__)
 
 # 启动自检：开了真模型却缺 key 就在这里抛 ConfigError（并打印中文提示），
 # 不让进程「看起来起来了、实际悄悄用假模型」。
@@ -600,6 +601,7 @@ def health() -> dict:
     info = mode_info()
     return {
         "status": "ok",
+        "version": __version__,
         "mode": info["mode"],
         "models": {"chat": info["chat"], "embed": info["embed"]},
     }

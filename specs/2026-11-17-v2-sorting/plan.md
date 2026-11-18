@@ -16,7 +16,7 @@
 
 ## 全局约定
 
-- 工作目录 `D:\workspace\work\python\sales-agent-v2`；后端解释器 `.venv\Scripts\python.exe`。
+- 工作目录 = 仓库根；后端解释器 `.venv\Scripts\python.exe`。
 - 三条固定验证命令（除单独写明外，每个增量收尾都要跑）：
   - `.\\.venv\\Scripts\\python.exe -m pytest -q` —— 基线是 **247 passed**，新用例只能加不能减。
   - `.\\.venv\\Scripts\\python.exe -m ruff check .`
