@@ -12,20 +12,26 @@
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q` → 247 passed；`.\.venv\Scripts\python.exe -m pytest -q tests\test_migration_v2.py` → 全绿；`$env:PYTHONPATH='src'; lint-imports` → 契约全过
   - 预估：6h　依赖：无
 
-- [ ] **[T002] 归属候选打分纯规则**
-  - 目标：给一段原文特征 + 候选客户，输出"建议归属 / 进待认领池"与置信度，阈值 0.7 的四种走位都有用例。
-  - 涉及文件：`src/salescopilot/domain/sorting.py`（新建）、`tests/test_sorting_domain.py`（新建）
-  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_domain.py`；`-m pytest -q tests\test_no_industry_words.py`
-  - 预估：5h　依赖：T001（要用 `card_section` 常量）
+- [ ] **[T002] 归属三级漏斗 + 审计日志**
+  - 目标：`domain/matching.py` 实现规范化 → L0 精确键 → L1 字符串（rapidfuzz）→ L2 向量 的短路漏斗，按模板阈值给出 `auto` / `review` / `new_lead`，每次判定带 `scorer` / `score` / `threshold` / 候选列表；L1 ≥95、L2 ≥0.92 都必须有第二字段佐证才自动，向量永不单独授权合并。
+  - 涉及文件：`src/salescopilot/domain/matching.py`（新建）、`src/salescopilot/domain/sorting.py`（新建，`card_section_of` 与出库优先级）、`tests/test_matching_domain.py`（新建）、`tests/test_sorting_domain.py`（新建）
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_matching_domain.py tests\test_sorting_domain.py`；`-m pytest -q tests\test_no_industry_words.py`；用例覆盖 L1 94.9/95.0/85.0/84.9 与 L2 0.919/0.92/0.80/0.799 边界
+  - 预估：8–10h　依赖：T001（要用 `card_section` 常量）
 
-- [ ] **[T003] 一次投料 → 分拣单（fake LLM）**
-  - 目标：`POST /sorting` 一次投料产出含归属 / 要素 / 分级 / 出库四块的分拣单，每块带原文片段；`GET /sorting/batches` 能查。
-  - 涉及文件：`src/salescopilot/adapters/llm/prompts_sorting.py`（新建）、`src/salescopilot/adapters/llm/fake.py`、`src/salescopilot/adapters/llm/deepseek.py`、`src/salescopilot/domain/ports.py`、`src/salescopilot/services/sorting.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_sorting_service.py`（新建）、`tests/test_sorting_api.py`（新建）
-  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_service.py tests\test_sorting_api.py`；`/docs` 里发一次 `POST /sorting` 看到四块 JSON 且 `source_span` 非空
-  - 预估：8h　依赖：T002
+- [ ] **[T002b] 阈值校准脚本 + 50 对标注样本** 🔒（口径）
+  - 目标：用 50 对人工标注的客户对子扫 precision / recall，产出建议阈值并可写回模板 `matching:` 段；校准报告落 `data/reports/`。
+  - 涉及文件：`data/evalsets/entity_pairs.jsonl`（新建，50 对）、`scripts/calibrate_thresholds.py`（新建）、`data/reports/matching_calibration.md`（脚本产出）、`requirements-dev.txt`（追加 `rapidfuzz`）、`tests/test_calibrate_thresholds.py`（新建）
+  - 验收命令：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --dry-run` 打印 50 对上的阈值扫描表与建议值；`.\.venv\Scripts\python.exe -m pytest -q tests\test_calibrate_thresholds.py`
+  - 预估：3h　依赖：T002
+
+- [ ] **[T003] 一次投料 → 分拣单（fake LLM + 出处对齐校验）**
+  - 目标：`POST /sorting` 一次投料产出含归属 / 要素 / 分级 / 出库四块的分拣单，每块带能在原文定位到的 `source_span`；归属只在 `band='review'` 且候选 ≤3 时调 LLM 复核（其余档位不调，可断言调用次数）；`source_span` 落库前过 `domain/span_align.py`，对不上的字段丢弃并记 `span_misaligned` 诊断。
+  - 涉及文件：`src/salescopilot/adapters/llm/prompts_sorting.py`（新建）、`src/salescopilot/domain/span_align.py`（新建）、`src/salescopilot/adapters/llm/fake.py`、`src/salescopilot/adapters/llm/deepseek.py`、`src/salescopilot/domain/ports.py`、`src/salescopilot/services/sorting.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_sorting_service.py`（新建）、`tests/test_sorting_api.py`（新建）、`tests/test_span_align.py`（新建）
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_service.py tests\test_sorting_api.py tests\test_span_align.py`；`/docs` 里发一次 `POST /sorting` 看到四块 JSON 且 `source_span` 能在原文定位
+  - 预估：9h　依赖：T002、T002b
 
 - [ ] **[T004] 分拣确认与待认领池**
-  - 目标：同意 / 改归属 / 忽略三个动作各走通且只追加；置信度 < 0.7 或多候选的投料进待认领池，不落客户。
+  - 目标：同意 / 改归属 / 忽略三个动作各走通且只追加；`band='review'`（灰区无佐证 / 多候选 / L2 落在 0.80–0.92）的投料进待认领池，不落客户。
   - 涉及文件：`src/salescopilot/services/sorting.py`、`src/salescopilot/adapters/db/sqlite.py`、`src/salescopilot/entrypoints/api/app.py`、`tests/test_sorting_confirm.py`（新建）
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_sorting_confirm.py` ＋ 全量 `pytest -q`；`GET /sorting/batches?pending_claim=1` 能过滤出在池的单
   - 预估：6h　依赖：T003
@@ -74,7 +80,8 @@
 
 ## 汇总
 
-- 增量数：**10**（阶段 A 4 个 / B 2 个 / C 2 个 / D 2 个）
-- 总预估：**66 小时**（6+5+8+6+6+8+6+5+10+6），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
-- 排序原则：先数据层与迁移（T001，保证后面每一步都有地方落）→ 再按"分拣 → 卡片 → 分级 → 出库"的数据依赖推进 → 前端最后接（后端接口定型后再画页面）→ 最后换场并做全量验收。不勾完上一阶段不进下一阶段。
-- 并行机会：T002 与 T005 互不依赖，可并行；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次。
+- 增量数：**11**（阶段 A 5 个：T001 / T002 / T002b / T003 / T004；B 2 个；C 2 个；D 2 个）
+- 总预估：**73 小时**（6 + 9 + 3 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 6；T002 取 8–10h 的中值 9h），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
+- 依赖关系：**T002 → T002b → T003**（阈值先校准、再让分拣链路用上校准值，避免拿拍脑袋的阈值去跑真实投料）；其余依赖不变：T001 → T002 / T005，T003 → T004，T004 + T005 + T006 + T008 → T009，T009 → T010。
+- 排序原则：先数据层与迁移（T001，保证后面每一步都有地方落）→ 再按"分拣（含阈值校准）→ 卡片 → 分级 → 出库"的数据依赖推进 → 前端最后接（后端接口定型后再画页面）→ 最后换场并做全量验收。不勾完上一阶段不进下一阶段。
+- 并行机会：T002 与 T005 互不依赖，可并行；T002b 的 50 对标注样本可以提前单独标（纯人工，不占开发工时）；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次。
