@@ -5,7 +5,7 @@
 }
 
 .page {
-  max-width: 880px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 24px 16px 48px;
 }
@@ -114,6 +114,59 @@ th {
 .badge.lock {
   background: #fff4d6;
   color: #7a5b00;
+}
+
+/* 档位徽标：四个页签看到的是同一套配色（A 绿 / B 黄 / C 灰 / 未分级浅灰）。 */
+.grade-badge {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.grade-badge.a {
+  background: #e7f6ec;
+  border-color: #b7e2c4;
+  color: #17663a;
+}
+
+.grade-badge.b {
+  background: #fff4d6;
+  border-color: #f0d896;
+  color: #7a5b00;
+}
+
+.grade-badge.c {
+  background: #eef1f4;
+  border-color: #d6dce3;
+  color: #3d4653;
+}
+
+.grade-badge.pending {
+  background: #f6f8fa;
+  border-color: #e1e4e8;
+  color: #8a939d;
+}
+
+/* 「无价值跟进」：橙色，提醒这次跟进没给客户新东西（口径在后端，这里只负责显眼）。 */
+.badge.novalue {
+  background: #fff3e0;
+  border-color: #f0d896;
+  color: #b35900;
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #1f6feb;
+  font-size: inherit;
+  cursor: pointer;
 }
 
 .row-actions {

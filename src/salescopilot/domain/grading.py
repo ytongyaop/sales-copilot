@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
-from salescopilot.domain.models import Fact
+from salescopilot.domain.models import Fact, GradingRecord
 
 # 分档取值：三档 ＋ 「待补全」。`GRADE_VALUES` 只含三档，人工定档只能选这三个。
 GRADE_A = "A"
@@ -29,6 +29,10 @@ GRADE_B = "B"
 GRADE_C = "C"
 GRADE_NEEDS_INFO = "needs_info"
 GRADE_VALUES: tuple[str, ...] = (GRADE_A, GRADE_B, GRADE_C)
+
+# 还没判过档的客户：`unknown` 不是一个档位，而是「还没有结论」。
+# 待办排序、货架分组、详情页徽标都用这个说法，不再各自拼一个「未分级」以外的取值。
+GRADE_UNKNOWN = "unknown"
 
 # 四个维度及其展示名：键名与模板 `grading.weights` 一一对应（顺序即展示顺序）。
 DIM_AMOUNT = "amount"
@@ -226,6 +230,28 @@ def parse_iso_date(text: str) -> date | None:
         return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def current_value(records: list[GradingRecord]) -> str:
+    """该客户当前档位：最近一次**人工值**优先，其次最近一次 AI 值，都没有返回 `unknown`。
+
+    人工值压过 AI 值是分级的主权规则（人改判了就以人为准），所以两列分别倒着找第一条非空；
+    这条口径在此收口一次，待办排序、货架分组与详情页徽标都从这里取，别各写一遍。
+    """
+    latest_human = _latest_non_empty(records, "human_value")
+    if latest_human:
+        return latest_human
+    latest_ai = _latest_non_empty(records, "ai_value")
+    return latest_ai or GRADE_UNKNOWN
+
+
+def _latest_non_empty(records: list[GradingRecord], field: str) -> str:
+    """倒着找第一条该列非空的留痕（`human_value` / `ai_value` 用同一套逻辑）。"""
+    for record in reversed(records):
+        value = getattr(record, field, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 # --------------------------------------------------------------------- 四维打分

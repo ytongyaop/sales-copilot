@@ -33,6 +33,7 @@ from salescopilot.domain.models import (
 from salescopilot.domain.reminders import Reminder
 from salescopilot.domain.review import ReviewSummary
 from salescopilot.domain.rules import ValidationIssue
+from salescopilot.domain.shelf import ShelfEntry
 from salescopilot.domain.sorting import SortingSuggestion
 from salescopilot.domain.todo import TodoItem
 from salescopilot.entrypoints.bootstrap import (
@@ -49,6 +50,7 @@ from salescopilot.entrypoints.bootstrap import (
     build_reclaim_service,
     build_reminder_service,
     build_review_service,
+    build_shelf_service,
     build_sorting_service,
     build_todo_service,
     check_live_config,
@@ -67,6 +69,7 @@ from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
 from salescopilot.services.review import ReviewService
+from salescopilot.services.shelf import ShelfService
 from salescopilot.services.sorting import SortingService
 from salescopilot.services.todo import TodoService
 
@@ -302,6 +305,10 @@ def get_review_service() -> Iterator[ReviewService]:
     yield build_review_service()
 
 
+def get_shelf_service() -> Iterator[ShelfService]:
+    yield build_shelf_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -317,6 +324,7 @@ CardDep = Annotated[CardService, Depends(get_card_service)]
 GradingDep = Annotated[GradingService, Depends(get_grading_service)]
 TodoDep = Annotated[TodoService, Depends(get_todo_service)]
 ReviewDep = Annotated[ReviewService, Depends(get_review_service)]
+ShelfDep = Annotated[ShelfService, Depends(get_shelf_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -510,6 +518,25 @@ def _grading_record_body(record: GradingRecord) -> dict:
     }
 
 
+def _shelf_body(entry: ShelfEntry) -> dict:
+    """货架上的一张客户小卡：名称 / 归属人 / 档位 / 覆盖度 / 缺项数 / 下次约定。
+
+    字段名与 `domain/shelf.py` 的 `ShelfEntry` 一一对应，不做改名——前端只认一套词。
+    `coverage` 保留 4 位小数（前端画比例条与百分比文字）。
+    """
+    return {
+        "lead_id": entry.lead_id,
+        "name": entry.name,
+        "owner": entry.owner,
+        "grade": entry.grade,
+        "coverage": round(entry.coverage, 4),
+        "filled": entry.filled,
+        "total": entry.total,
+        "missing_count": entry.missing_count,
+        "next_appointment": entry.next_appointment,
+    }
+
+
 def _todo_body(item: TodoItem) -> dict:
     """一条待办：排序说明（`priority` / `due_kind`）+ 为什么跟 + 做什么 + 给什么。
 
@@ -662,6 +689,16 @@ def import_leads(payload: ImportIn, service: ImportDep) -> dict:
 def list_lead_pool(service: AssignmentDep) -> list[dict]:
     """公海：没有归属人的线索，按创建时间倒序；空表返回 `[]`。"""
     return [_lead_body(lead) for lead in service.pool()]
+
+
+@app.get("/leads/shelf")
+def list_lead_shelf(service: ShelfDep) -> list[dict]:
+    """客户货架：每条客户一张小卡（档位 / 覆盖度 / 缺项数 / 下次约定），一次取完。
+
+    只读、不写库；顺序与 `GET /leads` 一致。货架上的分组与数字由前端只负责分箱，
+    档位与覆盖度都从后端取，不在浏览器里重算。
+    """
+    return [_shelf_body(entry) for entry in service.list()]
 
 
 @app.post("/leads/{lead_id}/claim")
@@ -887,6 +924,26 @@ def list_grading_history(lead_id: str, service: GradingDep):
     if issues:
         return JSONResponse(status_code=404, content=_issue_body(issues))
     return rows
+
+
+@app.get("/leads/{lead_id}/grading/latest")
+def get_grading_latest(lead_id: str, service: GradingDep):
+    """该客户当前的档位与四维分解：**只读，不落库**（看一次详情不会多写一行留痕）。
+
+    - `current`：当前档位（人工值优先、AI 值次之、都没判过是 `unknown`）；
+    - `record`：最近一条留痕；从没分级过的客户是 `null`，接口仍回 200 让页面显示「未分级」；
+    - `result`：按当前事实现算的四维分解（`low` / `high` / `dims` / `reason` / `basis`），
+      与 `POST .../grading/propose` 返回的是同一份形状，区别只在「写不写留痕」。
+    线索不存在 404。
+    """
+    snapshot, issues = service.latest(lead_id)
+    if snapshot is None:
+        return JSONResponse(status_code=_grading_status(issues), content=_issue_body(issues))
+    return {
+        "current": snapshot.current,
+        "record": None if snapshot.record is None else _grading_record_body(snapshot.record),
+        "result": _grading_body(snapshot.result),
+    }
 
 
 # ---------------------------------------------------------------- 今日待办

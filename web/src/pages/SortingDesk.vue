@@ -4,14 +4,15 @@ import {
   claimBatch,
   confirmBatch,
   getBatch,
-  getHealth,
   listBatches,
   listLeads,
+  listTodo,
   reviewBatch,
   sortContent,
 } from '../api'
+import { gradeBadge, gradeClass } from '../labels'
 
-// 分拣台只做三件事：投料、看这张单、处置。四块判断（归属 / 要素 / 分级 / 出库）
+// 分拣台只做四件事：看今日待办、投料、看这张单、处置。四块判断（归属 / 要素 / 分级 / 出库）
 // 全在后端 domain/sorting.py；这里只翻译中文、显示后端给的原因，不复制任何规则。
 
 // 状态 → 中文徽标：取值就是后端 SORTING_STATUSES 那四个，前端只负责翻译与配色。
@@ -50,7 +51,10 @@ const FIELD_LABELS = {
 const EMPTY_TEXT = '还没有分拣单，先把一段客户信息丢进上面的框里'
 
 const leads = ref([])
-const health = ref(null)
+
+// 今日待办：顺序与「为什么现在跟」「今天做什么」「给什么」全来自后端 /todo，前端只负责显示。
+const todo = ref([])
+const todoError = ref('')
 
 // 投料区
 const content = ref('')
@@ -86,6 +90,11 @@ const skippedText = computed(() => {
 
 function statusLabel(status) {
   return STATUS_LABELS[status] || status
+}
+
+// 待办行点一下 → 抛给外层打开客户详情。
+function openTodo(item) {
+  emit('open-lead', item.lead_id)
 }
 
 function sectionLabel(section) {
@@ -127,19 +136,22 @@ function setUrlBatch(batchId) {
   window.history.replaceState({}, '', url)
 }
 
-async function loadHealth() {
-  try {
-    health.value = await getHealth()
-  } catch {
-    health.value = null
-  }
-}
-
 async function loadLeads() {
   try {
     leads.value = await listLeads()
   } catch (err) {
     error.value = err.message
+  }
+}
+
+// 待办取不到只影响这一块（不把投料与分拣单一起拖成白屏）。
+async function loadTodo() {
+  try {
+    todo.value = await listTodo()
+    todoError.value = ''
+  } catch (err) {
+    todo.value = []
+    todoError.value = err.message
   }
 }
 
@@ -175,6 +187,8 @@ async function submit() {
     setUrlBatch(created.batch_id)
     content.value = ''
     await loadLists()
+    // 新投的料可能改了归属或分级：待办顺序要跟着变。
+    await loadTodo()
   } catch (err) {
     error.value = err.message
   } finally {
@@ -194,6 +208,8 @@ async function accept() {
     card.value = body.batch
     cardResult.value = { applied: body.applied, skipped: body.skipped || [] }
     await loadLists()
+    // 事实写进去了 → 缺项少了 → 待办里的「给什么」与排序都会变。
+    await loadTodo()
   } catch (err) {
     error.value = err.message
   } finally {
@@ -340,17 +356,19 @@ async function openBatch(batchId) {
 }
 
 onMounted(async () => {
-  await loadHealth()
   await loadLeads()
   await loadLists()
+  await loadTodo()
   // URL 带 `?batch=<id>` 就把那张单捧回来；没有就保持空态。
   const initial = batchIdFromUrl()
   if (initial) await openBatch(initial)
 })
 
-// 切回分拣台时重取客户与列表：客户可能刚在「线索」页新建/改过，
+// 切回分拣台时重取客户与列表：客户可能刚在「客户」页新建/改过，
 // 不重取就会出现「下拉里没有它、复核建议只能显示 id」。
 const props = defineProps({ active: { type: Boolean, default: false } })
+// 待办行点一下 → 让外层切到客户详情（分拣台不认识详情页，只负责把 id 抛上去）。
+const emit = defineEmits(['open-lead'])
 
 watch(
   () => props.active,
@@ -358,26 +376,42 @@ watch(
     if (!on) return
     await loadLeads()
     await loadLists()
+    await loadTodo()
   },
 )
 </script>
 
 <template>
   <div class="desk">
-    <header class="top">
-      <h1>分拣台</h1>
-      <span
-        v-if="health"
-        class="mode"
-        :class="health.mode === 'live' ? 'live' : 'fake'"
-        :title="health.models ? `对话模型：${health.models.chat}` : ''"
-      >
-        {{ health.mode === 'live' ? '模式：真模型' : '模式：假模型（演示数据不可信）' }}
-      </span>
-    </header>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="notice" class="notice">{{ notice }}</p>
+
+    <section class="card">
+      <h2>今日待办 <span class="muted">（{{ todo.length }} 家）</span></h2>
+      <p v-if="todoError" class="error">{{ todoError }}</p>
+      <p v-else-if="todo.length === 0" class="hint">今天没有必须跟的客户</p>
+      <ul v-else class="todo">
+        <li
+          v-for="item in todo"
+          :key="item.lead_id"
+          class="todo-row"
+          title="打开客户详情"
+          @click="openTodo(item)"
+        >
+          <span class="grade-badge" :class="gradeClass(item.grade)">{{ gradeBadge(item.grade) }}</span>
+          <div class="todo-body">
+            <div class="todo-head">
+              <strong>{{ item.lead_name }}</strong>
+              <span class="muted">{{ item.reason }}</span>
+            </div>
+            <p class="todo-action">今天：{{ item.action }}</p>
+            <p class="muted">给什么：{{ item.value_offered }}</p>
+          </div>
+          <span class="chevron">›</span>
+        </li>
+      </ul>
+    </section>
 
     <section class="card">
       <h2>投料</h2>
@@ -949,5 +983,58 @@ tr.clickable:hover {
 
 tr.clickable.active {
   background: #eef4ff;
+}
+
+/* 今日待办：一行一家，左边档位徽标、中间「为什么跟 / 做什么 / 给什么」、右边箭头。 */
+.todo {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todo-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 8px;
+  border-bottom: 1px solid #eef1f4;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.todo-row:last-child {
+  border-bottom: 0;
+}
+
+.todo-row:hover {
+  background: #f6f8fa;
+}
+
+.todo-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.todo-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.todo-action {
+  margin: 4px 0 2px;
+  font-size: 14px;
+}
+
+.todo-body p {
+  margin: 2px 0;
+  font-size: 13px;
+}
+
+.chevron {
+  color: #c4ccd4;
+  font-size: 18px;
+  line-height: 1;
 }
 </style>

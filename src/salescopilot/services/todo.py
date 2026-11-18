@@ -14,8 +14,8 @@
 from collections.abc import Callable
 from datetime import date
 
-from salescopilot.domain.grading import parse_iso_date
-from salescopilot.domain.models import GradingRecord, Lead
+from salescopilot.domain.grading import current_value, parse_iso_date
+from salescopilot.domain.models import Lead
 from salescopilot.domain.ports import (
     FactRepository,
     FollowupRepository,
@@ -24,9 +24,6 @@ from salescopilot.domain.ports import (
 )
 from salescopilot.domain.todo import TodoItem, build_todo
 from salescopilot.services.leads import utc_now_iso
-
-# 没判过档的客户：`grade` 与理由里都用这个说法，不假装是 C。
-GRADE_UNKNOWN = "unknown"
 
 
 class TodoService:
@@ -104,27 +101,10 @@ class TodoService:
         return template if isinstance(template, dict) else None
 
     def _grade(self, lead_id: str) -> str:
-        """该客户当前档位：最近一次留痕的 `human_value`，没有就取最近一次的 `ai_value`。
-
-        都没有就是 `unknown`（没判过档的客户照样进待办，只是排在最后）。
-        """
-        records = self._grading_history.list_for(lead_id)
-        return (
-            _latest_value(records, "human_value")
-            or _latest_value(records, "ai_value")
-            or GRADE_UNKNOWN
-        )
+        """该客户当前档位：口径与 `domain/grading.current_value` 同源（人工值优先）。"""
+        return current_value(self._grading_history.list_for(lead_id))
 
     def _today(self) -> date | None:
         """今天：只切注入时钟的日期部分；不是合法日期返回 None（不猜）。"""
         stamp = self._clock()
         return parse_iso_date(stamp[:10] if isinstance(stamp, str) else "")
-
-
-def _latest_value(records: list[GradingRecord], field: str) -> str:
-    """倒着找第一条该列非空的留痕（`human_value` / `ai_value` 用同一套逻辑）。"""
-    for record in reversed(records):
-        value = getattr(record, field, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""

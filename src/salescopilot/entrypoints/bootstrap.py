@@ -68,6 +68,7 @@ from salescopilot.services.knowledge import KnowledgeService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
 from salescopilot.services.review import ReviewService
+from salescopilot.services.shelf import ShelfService
 from salescopilot.services.sorting import SortingService
 from salescopilot.services.todo import TodoService
 
@@ -297,6 +298,18 @@ def build_todo_service() -> TodoService:
     followups: FollowupRepository = SqliteFollowupRepository(db)
     history: GradingRepository = SqliteGradingRepository(db)
     return TodoService(leads, facts, followups, history, template_loader)
+
+
+def build_shelf_service() -> ShelfService:
+    """客户货架用例：线索 + 跟进 + 分级留痕三条仓储 ＋ 信息卡用例（覆盖度与缺项直接复用）。
+
+    信息卡不重算：货架上的百分比与详情页必须是同一套口径，所以直接把 `CardService` 传进去。
+    """
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    followups: FollowupRepository = SqliteFollowupRepository(db)
+    history: GradingRepository = SqliteGradingRepository(db)
+    return ShelfService(leads, build_card_service(), followups, history)
 
 
 def build_review_service() -> ReviewService:

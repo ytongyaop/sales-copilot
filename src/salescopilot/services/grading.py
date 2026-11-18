@@ -21,6 +21,7 @@ from datetime import date
 from salescopilot.domain.grading import (
     GRADE_VALUES,
     GradingResult,
+    current_value,
     grade_from_facts,
     grading_spec,
     parse_iso_date,
@@ -47,6 +48,20 @@ class GradingDecision:
 
     record: GradingRecord
     mode: str
+
+
+@dataclass(frozen=True)
+class GradingSnapshot:
+    """详情页的一份分级快照：最近一条留痕 ＋ 按当前事实现算的四维分解。
+
+    `record` 为 None 表示这家还没分级（页面显示「未分级」，不当成错误）；
+    `current` 是当前档位（人工值优先、AI 值次之、都没判过是 `unknown`）；
+    `result` 是**现算**的：看一次详情不该往留痕里多写一行（只有 `propose` 才写）。
+    """
+
+    record: GradingRecord | None
+    current: str
+    result: GradingResult
 
 
 class GradingService:
@@ -168,6 +183,30 @@ class GradingService:
             return [], [ValidationIssue("lead_id", "线索不存在")]
         records = self._history.list_for(lead_id)
         return [_record_dict(record) for record in reversed(records)], []
+
+    def latest(self, lead_id: str) -> tuple[GradingSnapshot | None, list[ValidationIssue]]:
+        """当前档位与四维分解：**只读，不落库**（看详情不会往留痕里多写一行）。
+
+        与 `propose` 的唯一区别就在这里：`propose` 会追加一行建议，`latest` 只算不写。
+        线索不存在 / 模板缺段 / 时钟不合法时返回 `(None, 问题)`。
+        """
+        lead, spec, issues = self._lead_and_spec(lead_id)
+        if lead is None or spec is None:
+            return None, issues
+
+        today = self._today()
+        if today is None:
+            return None, [ValidationIssue("clock", "时钟返回值不是 YYYY-MM-DD，无法做紧迫度判断")]
+
+        records = self._history.list_for(lead_id)
+        return (
+            GradingSnapshot(
+                record=records[-1] if records else None,
+                current=current_value(records),
+                result=grade_from_facts(spec, self._facts.list_for(lead_id), today=today),
+            ),
+            [],
+        )
 
     # -------------------------------------------------------------- 内部动作
 

@@ -184,4 +184,50 @@ export function reviewBatch(id) {
   return request(`/sorting/${id}/review`)
 }
 
+// ---------------------------------------------------------------- 今日待办
+
+// 待办是后端排好的顺序（分级 → 到期 → 缺项 → 最久未联系），前端只负责显示与跳转。
+export function listTodo() {
+  return request('/todo')
+}
+
+// ---------------------------------------------------------------- 客户货架 / 详情
+
+// 货架：每家一张小卡（档位 / 覆盖度 / 缺项数 / 下次约定）一次取完，不在浏览器里重算。
+export function listShelf() {
+  return request('/leads/shelf')
+}
+
+export function getLeadCard(leadId) {
+  return request(`/leads/${leadId}/card`)
+}
+
+export function getGradingLatest(leadId) {
+  return request(`/leads/${leadId}/grading/latest`)
+}
+
+export function listGradingHistory(leadId) {
+  return request(`/leads/${leadId}/grading/history`)
+}
+
+// 重新评估：后端按规则出一次建议并写一行留痕（与详情页只读的 latest 不同）。
+export function proposeGrading(leadId) {
+  return request(`/leads/${leadId}/grading/propose`, { method: 'POST' })
+}
+
+// 改判：能不能改、要不要理由全由后端判（422 时把 issues 逐条显示）。
+export function decideGrading(leadId, payload) {
+  return request(`/leads/${leadId}/grading/decide`, jsonOptions('POST', payload))
+}
+
+// ---------------------------------------------------------------- 周复盘
+
+export function getReview() {
+  return request('/review')
+}
+
+export function saveReviewAnswers(answers) {
+  return request('/review/answers', jsonOptions('POST', { answers }))
+}
+
 export { OFFLINE_MESSAGE }
