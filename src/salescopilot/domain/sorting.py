@@ -41,9 +41,6 @@ SECTION_LABELS = {
 # 时间类字段：出库建议「指向最近一次约定的时间」时按这些字段名找原话。
 TIME_FIELDS = ("appointment_at", "next_followup_at", "appointment", "due_at")
 
-# 分层级的三个分值；分级兜底只产出这三个。
-GRADE_VALUES = ("A", "B", "C")
-
 # 联系方式精确键：手机号、邮箱、以及 8 位以上的数字串（座机、账号等）。
 _PHONE = re.compile(r"1[3-9]\d{9}")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")

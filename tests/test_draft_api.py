@@ -112,6 +112,33 @@ def test_generate_then_confirm_writes_followup(client: TestClient) -> None:
     assert [item["id"] for item in listed] == [followup["id"]]
 
 
+def test_confirm_carries_value_provided(client: TestClient) -> None:
+    """确认草稿可带「本次提供的价值」：原样透传到跟进留痕；不填就是空串。"""
+    lead_id = _lead_with_fact(client)
+    first = client.post(f"/leads/{lead_id}/draft").json()["draft_id"]
+    second = client.post(f"/leads/{lead_id}/draft").json()["draft_id"]
+
+    with_value = client.post(
+        f"/leads/{lead_id}/drafts/{first}/confirm",
+        json={
+            "objection": "price",
+            "next_followup_at": "2026-11-20",
+            "value_provided": " 退费流程说明 ",
+        },
+    )
+    without = client.post(
+        f"/leads/{lead_id}/drafts/{second}/confirm",
+        json={"objection": "time", "next_followup_at": "2026-11-21"},
+    )
+
+    assert with_value.status_code == 201, with_value.text
+    assert with_value.json()["value_provided"] == "退费流程说明"
+    assert without.status_code == 201, without.text
+    assert without.json()["value_provided"] == ""
+    listed = client.get(f"/leads/{lead_id}/followups").json()
+    assert [item["value_provided"] for item in listed] == ["退费流程说明", ""]
+
+
 def test_confirm_without_next_date_is_rejected(client: TestClient) -> None:
     lead_id = _lead_with_fact(client)
     draft_id = client.post(f"/leads/{lead_id}/draft").json()["draft_id"]

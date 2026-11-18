@@ -16,6 +16,7 @@ from salescopilot.adapters.db.sqlite import (
     SqliteFollowupRepository,
     SqliteGradingRepository,
     SqliteLeadRepository,
+    SqlitePreferenceSampleRepository,
     SqliteRawItemRepository,
     SqliteSortingBatchRepository,
     SqliteStageEventRepository,
@@ -46,6 +47,7 @@ from salescopilot.domain.ports import (
     FollowupRepository,
     GradingRepository,
     LeadRepository,
+    PreferenceSampleRepository,
     RawItemRepository,
     SortingBatchRepository,
     SortingJudge,
@@ -65,6 +67,7 @@ from salescopilot.services.ingest import IngestService
 from salescopilot.services.knowledge import KnowledgeService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
+from salescopilot.services.review import ReviewService
 from salescopilot.services.sorting import SortingService
 from salescopilot.services.todo import TodoService
 
@@ -294,6 +297,30 @@ def build_todo_service() -> TodoService:
     followups: FollowupRepository = SqliteFollowupRepository(db)
     history: GradingRepository = SqliteGradingRepository(db)
     return TodoService(leads, facts, followups, history, template_loader)
+
+
+def build_review_service() -> ReviewService:
+    """周复盘用例：四条业务仓储 + 提醒 / 信息卡两个用例 + 偏好样本仓储 + 模板加载器。
+
+    提醒与信息卡直接复用各自用例（不在这里重算超时与缺项）：复盘里的「卡点」与
+    「缺项排行」必须和列表页看到的是同一套口径，两处各算一遍迟早对不上。
+    """
+    db = default_db_path()
+    leads: LeadRepository = SqliteLeadRepository(db)
+    events: StageEventRepository = SqliteStageEventRepository(db)
+    followups: FollowupRepository = SqliteFollowupRepository(db)
+    history: GradingRepository = SqliteGradingRepository(db)
+    samples: PreferenceSampleRepository = SqlitePreferenceSampleRepository(db)
+    return ReviewService(
+        leads,
+        events,
+        followups,
+        history,
+        build_reminder_service(),
+        build_card_service(),
+        samples,
+        template_loader,
+    )
 
 
 def build_sorting_judge(live: bool | None = None) -> SortingJudge:

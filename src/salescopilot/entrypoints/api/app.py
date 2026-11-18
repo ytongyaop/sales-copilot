@@ -31,6 +31,7 @@ from salescopilot.domain.models import (
     StageEvent,
 )
 from salescopilot.domain.reminders import Reminder
+from salescopilot.domain.review import ReviewSummary
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.domain.sorting import SortingSuggestion
 from salescopilot.domain.todo import TodoItem
@@ -47,6 +48,7 @@ from salescopilot.entrypoints.bootstrap import (
     build_lead_service,
     build_reclaim_service,
     build_reminder_service,
+    build_review_service,
     build_sorting_service,
     build_todo_service,
     check_live_config,
@@ -64,6 +66,7 @@ from salescopilot.services.import_service import ImportService
 from salescopilot.services.ingest import IngestService
 from salescopilot.services.leads import LeadService
 from salescopilot.services.reminder_service import ReclaimService, ReminderService
+from salescopilot.services.review import ReviewService
 from salescopilot.services.sorting import SortingService
 from salescopilot.services.todo import TodoService
 
@@ -94,6 +97,9 @@ FIELD_LABELS = {
     "create_name": "客户名称",
     "mode": "分级模式",
     "actor": "操作者",
+    "answers": "答题列表",
+    "key": "问题编号",
+    "answer": "回答",
 }
 
 
@@ -145,10 +151,14 @@ class FactPatchIn(BaseModel):
 
 
 class DraftConfirmIn(BaseModel):
-    """POST /leads/{id}/drafts/{draft_id}/confirm 的请求体：人工补的异议与下次跟进时间。"""
+    """POST /leads/{id}/drafts/{draft_id}/confirm 的请求体：人工补的异议与下次跟进时间。
+
+    `value_provided` 不填就是空串（显式标记「这次跟进没给客户新东西」），不当作缺字段报 422。
+    """
 
     objection: str
     next_followup_at: str
+    value_provided: str = ""
 
 
 class ClaimIn(BaseModel):
@@ -204,6 +214,27 @@ class GradingDecideIn(BaseModel):
     value: str
     reason: str | None = None
     mode: str | None = None
+    actor: str | None = None
+
+
+class ReviewAnswerIn(BaseModel):
+    """一条校准作答：问题编号 + 回答正文。
+
+    `key` 只认那三个固定编号、`answer` 至少 2 字，判定在 `domain/review.py`
+    （这里只声明形状，不在路由里重复规则）。
+    """
+
+    key: str
+    answer: str
+
+
+class ReviewAnswersIn(BaseModel):
+    """POST /review/answers 的请求体：1–3 条作答 + 可选操作者。
+
+    `answers` 为空数组不在这里拦（形状合法），由用例层报「至少要回答一个问题」。
+    """
+
+    answers: list[ReviewAnswerIn]
     actor: str | None = None
 
 
@@ -267,6 +298,10 @@ def get_todo_service() -> Iterator[TodoService]:
     yield build_todo_service()
 
 
+def get_review_service() -> Iterator[ReviewService]:
+    yield build_review_service()
+
+
 LeadDep = Annotated[LeadService, Depends(get_lead_service)]
 FlowDep = Annotated[FlowService, Depends(get_flow_service)]
 FollowupDep = Annotated[FollowupService, Depends(get_followup_service)]
@@ -281,6 +316,7 @@ SortingDep = Annotated[SortingService, Depends(get_sorting_service)]
 CardDep = Annotated[CardService, Depends(get_card_service)]
 GradingDep = Annotated[GradingService, Depends(get_grading_service)]
 TodoDep = Annotated[TodoService, Depends(get_todo_service)]
+ReviewDep = Annotated[ReviewService, Depends(get_review_service)]
 
 
 def _issue_body(issues: list[ValidationIssue]) -> dict:
@@ -490,6 +526,14 @@ def _todo_body(item: TodoItem) -> dict:
         "value_offered": item.value_offered,
         "missing": list(item.missing),
     }
+
+
+def _review_body(summary: ReviewSummary) -> dict:
+    """一张周复盘的原样视图：字段名与 `ReviewSummary` 一一对应，不做改名、不做换算。
+
+    `answered` 不在这里拼：它是「这周答过没有」的接口拼装件，由路由单独加。
+    """
+    return asdict(summary)
 
 
 def _assignment_status(issues: list[ValidationIssue]) -> int:
@@ -927,6 +971,7 @@ def confirm_draft(lead_id: str, draft_id: str, payload: DraftConfirmIn, service:
         draft_id,
         objection=payload.objection,
         next_followup_at=payload.next_followup_at,
+        value_provided=payload.value_provided,
     )
     if outcome.item is None:
         return JSONResponse(
@@ -1084,3 +1129,32 @@ def review_sorting_batch(batch_id: str, service: SortingDep):
         status = 404 if any(issue.location == "batch_id" for issue in outcome.issues) else 422
         return JSONResponse(status_code=status, content=_issue_body(outcome.issues))
     return {"suggested_lead_id": outcome.lead_id, "reason": outcome.reason}
+
+
+# ---------------------------------------------------------------- 周复盘
+
+
+@app.get("/review")
+def weekly_review(service: ReviewDep) -> dict:
+    """本周复盘：推进 / 关闭 / 卡点 / 待补全 / 缺项前三 / 分级变动 / 无价值跟进 + 三个问题。
+
+    窗口是滚动 7 天（`domain/review.py` 的 `REVIEW_WINDOW_DAYS`），所有数字共用同一个窗口；
+    `answered` 表示这周是否已经答过校准问题，由服务单独判定后拼在这里。
+    没有客户时照样 200：数字全 0、问题照给（复盘页永远可打开）。
+    """
+    return {**_review_body(service.summary()), "answered": service.answered_this_week()}
+
+
+@app.post("/review/answers", status_code=201)
+def save_review_answers(payload: ReviewAnswersIn, service: ReviewDep):
+    """保存校准作答：成功 201 返回 `{"saved": n}`，一条问题一行 `preference_samples`。
+
+    至少 1 条、最多 3 条；问题编号不认识或回答短于 2 字一律 422 且**一条都不写**
+    （半条写进去会让「这周答过没有」说不清）。
+    """
+    saved, issues = service.answer(
+        [item.model_dump() for item in payload.answers], actor=payload.actor
+    )
+    if issues:
+        return JSONResponse(status_code=422, content=_issue_body(issues))
+    return {"saved": saved}

@@ -66,11 +66,12 @@
   - 预估：6h　依赖：T005、T006
   - 实际：新增 `domain/todo.py`（纯规则）+ `services/todo.py`（编排）+ `tests/test_todo_domain.py` / `test_todo_api.py`；三份模板加 `todo:` 段（`values` 四块文案 + `max_items` + `week_days`，阈值全部来自模板，代码不写死数字）；`followups.value_provided` 走幂等补列，空值即"无价值跟进"；顺带删掉 `domain/sorting.py` 的死代码 `grade_from_elements` 并把 PRD 的分级表述改成"规则主算"（对齐 ADR-0008）
 
-- [ ] **[T008] 周复盘 + 3 个校准问题**
+- [x] **[T008] 周复盘 + 3 个校准问题**
   - 目标：`GET /review` 汇总本周推进 / 卡点 / 分级变动 / 无价值跟进数，并接受 3 个校准问题作答写入 `preference_samples`。
-  - 涉及文件：`src/salescopilot/services/review.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`tests/test_review_service.py`（新建）
-  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_review_service.py`；`GET /review` 四块内容非空、`no_value_count ≥ 1` 可复现；作答后 `preference_samples` 加 3 行
+  - 涉及文件：`src/salescopilot/domain/review.py`（新建）、`src/salescopilot/services/review.py`（新建）、`src/salescopilot/entrypoints/api/app.py`、`src/salescopilot/entrypoints/bootstrap.py`、`tests/test_review_domain.py`（新建）、`tests/test_review_service.py`（新建）、`tests/test_review_api.py`（新建）
+  - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_review_domain.py tests\test_review_service.py tests\test_review_api.py`；`GET /review` 四块内容非空、`no_value_count ≥ 1` 可复现；作答后 `preference_samples` 加 3 行
   - 预估：5h　依赖：T007
+  - 实际：周窗口做成 `domain/review.py` 的 `REVIEW_WINDOW_DAYS = 7`（滚动、闭区间，不进模板：周是通用概念，做成参数会让同一引擎出现两套「本周」）；统计口径、三个固定问题与作答校验全部在纯函数里，`now` 由用例注入；`missing_top` 复用 `CardService.card` 的缺项（数客户数、不数字段数），`stuck` 复用 `ReminderService.list_all`，不另算一遍超时；`POST /review/answers` 先全量校验再落库（半条写进去会让「本周答过没有」说不清）；顺带清掉 `domain/sorting.py` 的死常量 `GRADE_VALUES`、把 `docs/架构.md` 机制二对齐 ADR-0008、草稿确认补 `value_provided`
 
 ## 阶段 D：前端与换场（S6–S7）
 

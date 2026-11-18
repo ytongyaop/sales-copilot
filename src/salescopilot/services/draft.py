@@ -156,12 +156,21 @@ class DraftService:
     # ------------------------------------------------------------------ 确认
 
     def confirm(
-        self, lead_id: str, draft_id: str, *, objection: str, next_followup_at: str
+        self,
+        lead_id: str,
+        draft_id: str,
+        *,
+        objection: str,
+        next_followup_at: str,
+        value_provided: str = "",
     ) -> ConfirmOutcome:
         """把草稿确认成一条跟进留痕：结论就是草稿正文，异议与时间由人补。
 
         落库成功后把同一段正文写进线索的 `conclusion` 字段：`close` 块要靠它才推得动，
         而人要写的就是「这次谈成了什么」——草稿正文正是那句话，不必再手抄一遍。
+
+        `value_provided` 与 `FollowupService.record` 同口径：**允许为空**，空串就是
+        「这次跟进没给客户新东西」，周复盘据此统计空转次数，所以这里不校验、不拒绝。
         """
         draft, issues = self._resolve_pending(lead_id, draft_id)
         if draft is None:
@@ -187,6 +196,7 @@ class DraftService:
             objection=objection.strip(),
             next_followup_at=next_followup_at.strip(),
             at=self._clock(),
+            value_provided=value_provided.strip() if isinstance(value_provided, str) else "",
         )
         self._followups.add(item)
         self._drafts.update_status(draft.id, DRAFT_CONFIRMED)
