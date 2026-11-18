@@ -66,7 +66,7 @@
   - `requirements-dev.txt`（修改）—— 追加 `rapidfuzz==<实际装到的版本>`。
   - `tests/test_calibrate_thresholds.py`（新建）—— 只测纯函数（阈值扫描 / 建议值选择），不联网、不读真库。
 - **验证**：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --dry-run` 打印 50 对上的扫描表与建议阈值；`-m pytest -q tests\test_calibrate_thresholds.py`。
-- **注**：向量列用 `FakeEmbedder` 或预生成的 `data/evalsets/entity_pairs_vectors.json`，避免每次校准都烧 API；阈值**没有公认值**，必须由这份样本产出，不照抄。
+- **注**：向量列用 `FakeEmbedder` 或预生成的 `data/evalsets/entity_pairs_vectors.json`，避免每次校准都烧 API；阈值**没有公认值**，必须由这份样本产出，不照抄。校准结果以 precision ≥0.95 为约束选 recall 最优（都不达标时取 precision 最高并提示补样本），`review` 取满足召回 ≥0.95 的灰区下沿。
 
 ### A3 `services/sorting.py` ＋ 分拣接口（fake LLM 可测）
 

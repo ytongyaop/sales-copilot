@@ -2,10 +2,12 @@
 
 判定顺序固定：精确键（L0）→ 字符串相似度（L1，rapidfuzz）→ 向量相似度（L2）。
 每一级只在上一级没给出结论时才看；结论只有三档 `auto` / `review` / `reject`。
-两条硬约束写进规则本身，不靠调用方自觉：
+三条硬约束写进规则本身，不靠调用方自觉：
 
 - L1 的高分（≥ `fuzzy_auto`）必须有第二字段佐证才能 `auto`，否则只能进复核；
-- 向量**永不单独授权**：L2 要 `auto` 必须同时有佐证，否则最高只能到 `review`。
+- 向量**永不单独授权**：L2 要 `auto` 必须同时有佐证，否则最高只能到 `review`；
+- 两个全称只在组织形式后缀上不同（「有限公司」vs「集团」）时，即使字符串 100 分也只能进
+  复核——那是不同法人主体，不是笔误（`suffix_only_difference`）。
 
 本模块只做计算：入参都是已取好的值（命中标志、相似度、佐证标志），
 不查库、不发网络请求、不取时钟；阈值由调用方按模板传入。
@@ -78,12 +80,12 @@ def _strip_brackets(text: str) -> str:
         text = stripped
 
 
-def _strip_org_suffix(text: str) -> str:
+def _strip_org_suffix(text: str, suffixes: tuple[str, ...] = ORG_SUFFIXES) -> str:
     """反复剥掉结尾的组织后缀；剥到只剩后缀本身时停手（不产出空串）。"""
     changed = True
     while changed:
         changed = False
-        for suffix in ORG_SUFFIXES:
+        for suffix in suffixes:
             if text.endswith(suffix) and len(text) > len(suffix):
                 text = text[: -len(suffix)]
                 changed = True
@@ -91,13 +93,36 @@ def _strip_org_suffix(text: str) -> str:
     return text
 
 
-def normalize_org(name: str) -> str:
+def normalize_org(name: str, *, suffixes: tuple[str, ...] = ORG_SUFFIXES) -> str:
     """机构名规范化：全角转半角 → 去空白 → 去后缀 → 去括号内容 → 小写。
 
     「科技」「网络」等业务词按调研结论保留，只删组织形态后缀。
     """
-    text = _strip_org_suffix(_squeeze(name))
+    text = _strip_org_suffix(_squeeze(name), suffixes)
     return _strip_brackets(text).lower()
+
+
+def suffix_only_difference(
+    raw_a: str, raw_b: str, *, suffixes: tuple[str, ...] = ORG_SUFFIXES
+) -> bool:
+    """两个全称是否**只**在组织形式后缀上不同（核心串相同、原串不同）。
+
+    「华远科技有限公司」与「华远科技集团」核心串都是「华远科技」，但前者是有限公司、
+    后者是集团，法律上是两个主体，不能自动合并，只能进复核。
+
+    核心串与 `normalize_org` 同口径（连括号注记一起去掉）：否则「华远建设（北京）」
+    与「华远建设（上海）」规范化后同为「华远建设」、字符串 100 分，会被自动合并成一家，
+    而它们其实是在两地注册的两个主体。
+
+    判据要求原串（仅去首尾空白后）确实不同：完全同名、或只差首尾空白时返回 `False`，
+    由调用方按常规流程判（同名自然走精确键）。核心串为空（名称本身只有后缀）时也返回
+    `False`，避免把两个空壳判成「仅组织形式不同」。
+    """
+    core_a = _strip_brackets(_strip_org_suffix(_squeeze(raw_a), suffixes)).lower()
+    core_b = _strip_brackets(_strip_org_suffix(_squeeze(raw_b), suffixes)).lower()
+    if not core_a or not core_b or core_a != core_b:
+        return False
+    return _as_text(raw_a).strip() != _as_text(raw_b).strip()
 
 
 def normalize_person(name: str) -> str:
@@ -137,12 +162,16 @@ def decide_band(
     vector: float | None,
     corroborated: bool,
     thresholds: MatchThresholds,
+    suffix_only: bool = False,
 ) -> MatchDecision:
     """按固定顺序过漏斗，返回三档结论。
 
-    顺序（不能变）：精确键 → 字符串自动 → 字符串高分缺佐证 → 字符串复核区
-    → 向量自动（须佐证）→ 向量复核区 → 判为 reject。
+    顺序（不能变）：精确键 → 仅组织形式不同（强制复核）→ 字符串自动
+    → 字符串高分缺佐证 → 字符串复核区 → 向量自动（须佐证）→ 向量复核区 → 判为 reject。
     `score` 保留各自原始量纲：精确键 100.0、字符串 0-100、向量 0-1。
+
+    `suffix_only=True` 时跳过所有 `auto` 分支（精确键除外）：两个全称只在
+    「有限公司 / 集团」这类后缀上不同，法律上是不同主体，只能由人复核。
     """
     if exact_hit:
         return MatchDecision(
@@ -150,6 +179,14 @@ def decide_band(
             scorer="exact",
             score=100.0,
             reason="精确键命中（手机号/邮箱/信用代码/全称）",
+        )
+
+    if suffix_only:
+        return MatchDecision(
+            band="review",
+            scorer="fuzzy",
+            score=fuzzy,
+            reason="全称仅组织形式不同（如「有限公司」与「集团」），不能自动合并",
         )
 
     if fuzzy >= thresholds.fuzzy_auto:

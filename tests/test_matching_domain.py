@@ -20,6 +20,7 @@ from salescopilot.domain.matching import (
     normalize_person,
     normalize_with_alias,
     rank_candidates,
+    suffix_only_difference,
 )
 
 # 规则用例统一用默认阈值，避免每条都手写一份。
@@ -188,6 +189,48 @@ def test_rule5c_no_candidate_reaches_floor(vector: float | None) -> None:
     assert decision.band == "reject"
     assert decision.scorer == "none"
     assert "视为新客户" in decision.reason
+
+
+def test_suffix_only_difference_detects_company_vs_group() -> None:
+    """同一核心串、只差组织形式后缀 → True：「有限公司」与「集团」是两个法人。"""
+    assert suffix_only_difference("华远科技有限公司", "华远科技集团") is True
+
+
+def test_suffix_only_forces_review_even_at_full_score_with_corroboration() -> None:
+    """仅组织形式不同时，字符串 100 分且有佐证也只能 review；精确键仍然最高优先。"""
+    decision = decide_band(
+        exact_hit=False,
+        fuzzy=100.0,
+        vector=None,
+        corroborated=True,
+        thresholds=THRESHOLDS,
+        suffix_only=True,
+    )
+    assert decision.band == "review"
+    assert decision.scorer == "fuzzy"
+    assert decision.score == pytest.approx(100.0)
+    assert "不能自动合并" in decision.reason
+
+    # 精确键命中说明确实是同一家（如统一社会信用代码一致），此时与后缀无关，仍 auto。
+    exact = decide_band(
+        exact_hit=True,
+        fuzzy=100.0,
+        vector=None,
+        corroborated=True,
+        thresholds=THRESHOLDS,
+        suffix_only=True,
+    )
+    assert (exact.band, exact.scorer) == ("auto", "exact")
+
+
+def test_suffix_only_difference_false_for_identical_names() -> None:
+    """完全同名不算「仅组织形式不同」：没有差异就没有复核理由。"""
+    assert suffix_only_difference("华远科技", "华远科技") is False
+
+
+def test_suffix_only_difference_false_when_core_differs() -> None:
+    """核心串不同（多一个「远」字）时不算：那是近乎同名的另一家，不是同一家的两种写法。"""
+    assert suffix_only_difference("华远科技", "华远远科技") is False
 
 
 def test_rank_candidates_orders_by_score_then_scorer_and_truncates() -> None:

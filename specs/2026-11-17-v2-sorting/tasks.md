@@ -6,7 +6,7 @@
 
 ## 阶段 A：数据与分拣（S1）
 
-- [ ] **[T001] 数据层 + 迁移 + 不回归** 🔒
+- [x] **[T001] 数据层 + 迁移 + 不回归** 🔒
   - 目标：`facts` 多一个 `card_section` 列，新增 `sorting_batches` / `grading_history` / `preference_samples` 三张只追加表，旧库能平滑打开、v1 的 247 条不回归。
   - 涉及文件：`src/salescopilot/adapters/db/sqlite.py`、`src/salescopilot/domain/models.py`、`src/salescopilot/domain/ports.py`、`tests/test_migration_v2.py`（新建）、`tests/test_fact_fields_sync.py`（改断言）
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q` → 247 passed；`.\.venv\Scripts\python.exe -m pytest -q tests\test_migration_v2.py` → 全绿；`$env:PYTHONPATH='src'; lint-imports` → 契约全过
@@ -18,7 +18,7 @@
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q tests\test_matching_domain.py tests\test_sorting_domain.py`；`-m pytest -q tests\test_no_industry_words.py`；用例覆盖 L1 94.9/95.0/85.0/84.9 与 L2 0.919/0.92/0.80/0.799 边界
   - 预估：8–10h　依赖：T001（要用 `card_section` 常量）
 
-- [ ] **[T002b] 阈值校准脚本 + 50 对标注样本** 🔒（口径）
+- [x] **[T002b] 阈值校准脚本 + 50 对标注样本** 🔒（口径）
   - 目标：用 50 对人工标注的客户对子扫 precision / recall，产出建议阈值并可写回模板 `matching:` 段；校准报告落 `data/reports/`。
   - 涉及文件：`data/evalsets/entity_pairs.jsonl`（新建，50 对）、`scripts/calibrate_thresholds.py`（新建）、`data/reports/matching_calibration.md`（脚本产出）、`requirements-dev.txt`（追加 `rapidfuzz`）、`tests/test_calibrate_thresholds.py`（新建）
   - 验收命令：`.\.venv\Scripts\python.exe scripts\calibrate_thresholds.py --dry-run` 打印 50 对上的阈值扫描表与建议值；`.\.venv\Scripts\python.exe -m pytest -q tests\test_calibrate_thresholds.py`
