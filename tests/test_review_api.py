@@ -138,3 +138,24 @@ def test_answer_rejects_invalid_payloads(client: TestClient, answers: list[dict]
     assert response.status_code == 422, response.text
     assert response.json()["issues"]
     assert client.get("/review").json()["answered"] is False
+
+
+def test_second_answer_in_same_week_is_409(client: TestClient) -> None:
+    """同一周答第二遍：409 + 固定文案，且样本没有被追写（`answers` 仍是第一次那条）。"""
+    first = client.post(
+        "/review/answers",
+        json={"answers": [{"key": "b_to_a", "answer": "城建集团：预算批下来了"}]},
+    )
+    assert first.status_code == 201, first.text
+
+    again = client.post(
+        "/review/answers",
+        json={"answers": [{"key": "c_kept", "answer": "换一个说法再答一次"}]},
+    )
+
+    assert again.status_code == 409, again.text
+    assert again.json() == {
+        "issues": [{"location": "answers", "message": "本周已作答，下周再校准"}]
+    }
+    body = client.get("/review").json()
+    assert [item["key"] for item in body["answers"]] == ["b_to_a"]

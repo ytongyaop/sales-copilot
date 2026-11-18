@@ -37,7 +37,12 @@ def test_settings_shape_and_template_sections(client: TestClient) -> None:
     assert body["models"] == {"chat": "fake", "embed": "fake"}
 
     template_keys = [item["key"] for item in body["templates"]]
-    assert template_keys == ["building_materials", "edu_training", "software_outsourcing"]
+    assert template_keys == [
+        "building_materials",
+        "edu_training",
+        "software_outsourcing",
+        "tob_enterprise",
+    ]
     for item in body["templates"]:
         assert set(item) == TEMPLATE_KEYS
         assert item["name"]

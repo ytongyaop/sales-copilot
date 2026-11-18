@@ -100,7 +100,9 @@ def test_reminders_list_and_per_lead(client: TestClient, tmp_path: Path) -> None
     assert reminder["lead_name"] == "线索-old-lead"
     assert reminder["kind"] == "first_response"
     assert reminder["level"] == "red"
-    assert reminder["message"] == "超过 30 分钟未首联"
+    # 阈值取自「这条线索的模板」；`_insert_lead` 用实体默认模板（T010 起是
+    # tob_enterprise，首响 120 分钟），所以文案是 120 而不是教培模板的 30。
+    assert reminder["message"] == "超过 120 分钟未首联"
     assert isinstance(reminder["since_minutes"], int)
 
     # 新线索刚建、什么都没发生 → 单线索提醒是空的

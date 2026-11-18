@@ -19,7 +19,7 @@ from salescopilot.adapters.db.sqlite import (
     SqliteSortingBatchRepository,
 )
 from salescopilot.adapters.llm.fake import FakeSorting
-from salescopilot.domain.models import INITIAL_STAGE, Lead
+from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
 from salescopilot.services.sorting import SortingService
 
 # 没有任何候选：判为新客户候选，进待认领池。
@@ -107,7 +107,9 @@ def test_claim_with_create_name_uses_contact_from_elements(tmp_path: Path) -> No
     assert created.contact == "13800009999"
     assert created.source == "other"
     assert created.stage == INITIAL_STAGE
-    assert created.template == "edu_training"
+    # 认领新建走默认模板（T010 起是主演示模板 tob_enterprise）；比较常量而不是字面量，
+    # 换默认模板时这条断言跟着走，不必再改一次。
+    assert created.template == DEFAULT_TEMPLATE
 
 
 def test_claim_with_create_name_without_contact_warns_and_leaves_it_empty(

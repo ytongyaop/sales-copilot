@@ -48,6 +48,11 @@ MIN_ANSWER_LEN = 2
 # 一次最多答三条（就是上面那三个问题），多出来的没有地方可问。
 MAX_ANSWERS = len(QUESTIONS)
 
+# 「本周已经答过」时给的拒绝文案与位置：位置固定 `answers`，与其它作答问题同一处，
+# 前端只需要认一种错误体；文案写明下一步该干什么（下周再校准），不是一句「不能重复提交」。
+ANSWERS_LOCATION = "answers"
+ANSWERS_LOCKED_MESSAGE = "本周已作答，下周再校准"
+
 # 终止阶段（没有出口的块）从块契约推导，不在这里硬编码块名。
 TERMINAL_STAGES = frozenset(block_id for block_id, block in BLOCKS.items() if not block.exits)
 

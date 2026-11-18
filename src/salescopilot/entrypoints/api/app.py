@@ -31,7 +31,7 @@ from salescopilot.domain.models import (
     StageEvent,
 )
 from salescopilot.domain.reminders import Reminder
-from salescopilot.domain.review import ReviewSummary
+from salescopilot.domain.review import ANSWERS_LOCKED_MESSAGE, ReviewSummary
 from salescopilot.domain.rules import ValidationIssue
 from salescopilot.domain.shelf import ShelfEntry
 from salescopilot.domain.sorting import SortingSuggestion
@@ -1259,10 +1259,14 @@ def save_review_answers(payload: ReviewAnswersIn, service: ReviewDep):
 
     至少 1 条、最多 3 条；问题编号不认识或回答短于 2 字一律 422 且**一条都不写**
     （半条写进去会让「这周答过没有」说不清）。
+
+    **本周已经答过就回 409**（`{"issues":[{"location":"answers","message":"本周已作答，下周再校准"}]}`）：
+    入参本身没错，是时机不对——样本只追加不改写，同一周答两次会让「人怎么判的」有两种说法。
     """
     saved, issues = service.answer(
         [item.model_dump() for item in payload.answers], actor=payload.actor
     )
     if issues:
-        return JSONResponse(status_code=422, content=_issue_body(issues))
+        status = 409 if any(issue.message == ANSWERS_LOCKED_MESSAGE for issue in issues) else 422
+        return JSONResponse(status_code=status, content=_issue_body(issues))
     return {"saved": saved}

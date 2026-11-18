@@ -25,16 +25,22 @@ def _create_lead(client: TestClient, **overrides) -> dict:
     return response.json()
 
 
-def test_get_templates_returns_three_with_flow_lengths(client: TestClient) -> None:
+def test_get_templates_returns_four_with_flow_lengths(client: TestClient) -> None:
     body = client.get("/templates").json()
 
     assert {item["key"] for item in body} == {
         "edu_training",
         "software_outsourcing",
         "building_materials",
+        "tob_enterprise",
     }
     lengths = {item["key"]: len(item["flow"]) for item in body}
-    assert lengths == {"edu_training": 6, "software_outsourcing": 6, "building_materials": 5}
+    assert lengths == {
+        "edu_training": 6,
+        "software_outsourcing": 6,
+        "building_materials": 5,
+        "tob_enterprise": 6,
+    }
 
 
 def test_get_templates_carries_labels(client: TestClient) -> None:
@@ -51,12 +57,18 @@ def test_get_templates_carries_labels(client: TestClient) -> None:
     assert building_labels["intake"] == "线索入库"
     assert set(building_labels) == set(body["building_materials"]["flow"])
 
+    # 主演示模板的行业叫法同样只来自模板 label
+    tob_labels = body["tob_enterprise"]["labels"]
+    assert tob_labels["appointment"] == "方案会"
+    assert set(tob_labels) == set(body["tob_enterprise"]["flow"])
 
-def test_create_lead_defaults_to_edu_template(client: TestClient) -> None:
+
+def test_create_lead_defaults_to_tob_template(client: TestClient) -> None:
+    """默认模板是主演示模板 `tob_enterprise`（T010 换场）；DEFAULT_TEMPLATE 只有一处。"""
     body = _create_lead(client)
 
     assert body["stage"] == "intake"
-    assert body["template"] == "edu_training"
+    assert body["template"] == "tob_enterprise"
 
 
 def test_advance_success_returns_lead_and_stage_event(client: TestClient) -> None:
@@ -74,7 +86,7 @@ def test_advance_success_returns_lead_and_stage_event(client: TestClient) -> Non
     # 列表接口也应看到推进后的阶段
     listed = client.get("/leads").json()[0]
     assert listed["stage"] == "first_contact"
-    assert listed["template"] == "edu_training"
+    assert listed["template"] == "tob_enterprise"
 
 
 def test_advance_event_matches_persisted_history(client: TestClient, tmp_path: Path) -> None:

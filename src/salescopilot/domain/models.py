@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 INITIAL_STAGE = "intake"
 
 # 每条线索默认用哪份模板；取值是模板文件名（不含后缀），见 `templates/*.yaml`。
-DEFAULT_TEMPLATE = "edu_training"
+# 这是**唯一**的默认值来源（`Lead` 实体默认值、建线索 / CSV 导入 / 分拣认领新建、
+# 仪表盘阈值都从这里取）。v2 换场后主演示是 ToB 企业销售，教培降为第二模板。
+DEFAULT_TEMPLATE = "tob_enterprise"
 
 # 线索来源只认这几个通用入口；扩展枚举要改这里，不要在别处另写一份。
 ALLOWED_SOURCES: tuple[str, ...] = ("referral", "inbound", "outbound", "event", "other")

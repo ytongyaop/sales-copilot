@@ -24,6 +24,8 @@ from salescopilot.domain.ports import (
 )
 from salescopilot.domain.reminders import parse_moment
 from salescopilot.domain.review import (
+    ANSWERS_LOCATION,
+    ANSWERS_LOCKED_MESSAGE,
     QUESTION_TEXTS,
     ReviewSummary,
     build_review,
@@ -94,9 +96,16 @@ class ReviewService:
         校验不过就**一条都不写**（先全量校验再落库）：半条写进去会让
         「本周答过没有」变成说不清的状态。
 
+        **本周已作答就不再收**（位置 `answers`、文案 `ANSWERS_LOCKED_MESSAGE`）：
+        校准样本只追加不改写，同一周答两次会让「这一周人是怎么判的」出现两种说法；
+        想改答案要等下一个窗口。路由据这条文案回 409（不是 422——入参没错，是时机不对）。
+
         `actor` 目前不做记录：`preference_samples` 没有操作者列，
         与其在 `answer` 里拼一句「李娜：…」，不如等表要留痕时再加一列。
         """
+        if self.answered_this_week():
+            return 0, [ValidationIssue(ANSWERS_LOCATION, ANSWERS_LOCKED_MESSAGE)]
+
         issues = validate_answers(answers)
         if issues:
             return 0, issues

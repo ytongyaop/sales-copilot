@@ -9,10 +9,15 @@ from salescopilot.adapters.template.loader import TemplateError, load_all, load_
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "src" / "salescopilot" / "templates"
 
 
-def test_load_all_three() -> None:
+def test_load_all_four() -> None:
     data = load_all(TEMPLATES_DIR)
-    assert len(data) == 3
-    assert set(data) == {"edu_training", "software_outsourcing", "building_materials"}
+    assert len(data) == 4
+    assert set(data) == {
+        "edu_training",
+        "software_outsourcing",
+        "building_materials",
+        "tob_enterprise",
+    }
 
 
 def test_syntax_error_mentions_file_and_line(tmp_path: Path) -> None:

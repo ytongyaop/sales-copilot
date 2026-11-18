@@ -228,3 +228,23 @@ def test_answered_this_week_flips_after_answering(tmp_path: Path) -> None:
     setup.service.answer([{"key": "c_kept", "answer": "这家一直在等预算"}])
 
     assert setup.service.answered_this_week() is True
+
+
+def test_second_answer_in_same_week_is_rejected(tmp_path: Path) -> None:
+    """同一周答第二遍：一条都不写，返回 `answers` 位置的「下周再校准」。
+
+    样本只追加不改写，同一周答两次会让「人怎么判的」出现两种说法，
+    所以第二遍连入参都不再校验——拦的是时机，不是内容。
+    """
+    setup = Setup(tmp_path)
+    assert setup.service.answer([{"key": "b_to_a", "answer": "城建集团预算批了"}]) == (1, [])
+
+    saved, issues = setup.service.answer([{"key": "c_kept", "answer": "换成这一家的理由"}])
+
+    assert saved == 0
+    assert [(issue.location, issue.message) for issue in issues] == [
+        ("answers", "本周已作答，下周再校准")
+    ]
+    rows = setup.samples.list_all()
+    assert len(rows) == 1
+    assert rows[0].question == "这周你把哪家从 B 提到了 A？为什么？"

@@ -1,6 +1,6 @@
 """块契约与模板校验的行为测试。
 
-这里只测「纯校验函数」与「三份模板数据」：不推进状态机、不碰 API。
+这里只测「纯校验函数」与「四份模板数据」：不推进状态机、不碰 API。
 """
 
 from pathlib import Path
@@ -10,14 +10,17 @@ from salescopilot.domain.blocks import BLOCKS
 from salescopilot.domain.rules import validate_template
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "src" / "salescopilot" / "templates"
-TEMPLATE_NAMES = {"edu_training", "software_outsourcing", "building_materials"}
+
+# 四份模板：tob_enterprise 是 v2 的主演示模板（`DEFAULT_TEMPLATE`），其余三份证明「同一套块
+# 换配置就能跑另一条流程」——它们与主演示模板一起过校验，迁移能力才不是口头承诺。
+TEMPLATE_NAMES = {"edu_training", "software_outsourcing", "building_materials", "tob_enterprise"}
 
 
 def _load() -> dict[str, dict]:
     return load_all(TEMPLATES_DIR)
 
 
-def test_all_three_templates_valid() -> None:
+def test_all_templates_valid() -> None:
     data = _load()
     assert set(data) == TEMPLATE_NAMES
     for name, template in data.items():
@@ -32,6 +35,9 @@ def test_removing_appointment_breaks_edu_only() -> None:
     edu_issues = validate_template(data["edu_training"], blocks=blocks)
     assert edu_issues, "教培模板引用了 appointment，块被删掉后必须报错"
     assert any("appointment" in issue.message for issue in edu_issues)
+
+    # ToB 模板也引用 appointment（方案会）：删块它同样过不了，这不是巧合而是同一份块契约。
+    assert validate_template(data["tob_enterprise"], blocks=blocks)
 
     assert validate_template(data["building_materials"], blocks=blocks) == []
 

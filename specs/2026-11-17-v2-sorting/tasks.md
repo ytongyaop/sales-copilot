@@ -75,22 +75,31 @@
 
 ## 阶段 D：前端与换场（S6–S7）
 
-- [ ] **[T009] 五入口前端重构**
+- [x] **[T009a] 五入口前端重构（导航 / 货架 / 详情）**
   - 目标：分拣台 / 客户 / 客户详情 / 复盘 / 设置五个入口串成一条链，所有数字只来自后端接口，后端挂掉显示业务语言错误。
-  - 涉及文件：`web/src/api.js`、`web/src/App.vue`、`web/src/pages/SortingDesk.vue`（新建）、`LeadsShelf.vue`（新建）、`LeadDetail.vue`（新建）、`Review.vue`（新建）、`Settings.vue`（新建）、`web/src/main.js`（必要时）
-  - 验收命令：`cd web; npm run build` 通过；`npm run dev` + 后端跑起来，逐页观察五个入口（投料 → 同意 → 客户出现 → 详情见要素与分级 → 复盘见记录 → 设置切模式生效）
+  - 涉及文件：`web/src/api.js`、`web/src/App.vue`、`web/src/pages/SortingDesk.vue`（新建）、`LeadsShelf.vue`（新建）、`LeadDetail.vue`（新建）、`web/src/labels.js`（新建）
+  - 验收命令：`cd web; npm run build` 通过；`npm run dev` + 后端跑起来，逐页观察（投料 → 同意 → 客户出现 → 详情见要素与分级）
   - 预估：10h　依赖：T004、T005、T006、T008
+  - 实际：四个页签 + 一个详情视图（不引路由，`v-show` 保活）；首屏先过 `/health` 门禁再挂载各页（修竞态），`api.js` 加 `retryOnce`（业务 422/404 不重试）
 
-- [ ] **[T010] ToB 模板 + 演示资料库 + 种子数据 + 全量验收** 🔒（换场口径）
+- [x] **[T009b] 复盘页 + 设置页 + CSV 导入迁移**
+  - 目标：复盘页走完「本周数字 → 卡点 → 缺项前三 → 本周改档 → 无价值跟进 → 校准问题作答 → 已作答回放」；设置页展示运行模式、分级模式说明、每份模板的阈值与权重；CSV 导入从货架挪到设置页。
+  - 涉及文件：`web/src/pages/ReviewPage.vue`（新建）、`SettingsPage.vue`（新建）、`App.vue`、`LeadsShelf.vue`（移除导入块）
+  - 验收命令：`cd web; npm run build` 通过；逐页观察复盘与设置两块内容非空、导入成功一次
+  - 预估：4h　依赖：T009a
+  - 实际：复盘页只有 `GET /review` 一个数据源（`answered` / `answers` 由后端拼），设置页只显示不判定；导入成功后显示「导入 N 条、跳过 M 条」
+
+- [x] **[T010] ToB 模板 + 演示资料库 + 种子数据 + 全量验收** 🔒（换场口径）
   - 目标：ToB 成为主演示路径，教培降为第二模板且仍通过校验；清库播种后五入口全链路一次跑通。
-  - 涉及文件：`src/salescopilot/templates/tob_enterprise.yaml`（新建）、`src/salescopilot/templates/edu_training.yaml`（只补数据）、`data/knowledge/tob_*.md`（新建）、`scripts/seed_demo.py`、`tests/test_templates.py`、`docs/演示脚本.md`、`web/README.md`
+  - 涉及文件：`src/salescopilot/templates/tob_enterprise.yaml`（新建）、`src/salescopilot/domain/models.py`（默认模板）、`data/knowledge/tob/*.md`（新建）、`scripts/seed_demo.py`、`tests/test_templates.py`、`tests/test_review_api.py`、`docs/演示脚本.md`、`README.md`、`web/README.md`
   - 验收命令：`.\.venv\Scripts\python.exe -m pytest -q` 全量绿；`.\.venv\Scripts\python.exe scripts\seed_demo.py` 后按 `docs/演示脚本.md` 走通五入口；`-m pytest -q tests\test_no_industry_words.py`
   - 预估：6h　依赖：T009
+  - 实际：`DEFAULT_TEMPLATE` 改一处（前端不再自带默认值，模板下拉留空＝后端决定）；ToB 资料放 `data/knowledge/tob/` 并在演示命令里用 `--docs-dir` 只索引它（假向量否则会把教培资料引到话术里）；`seed_demo.py` 全部走用例路径（`set_manual` / `advance` / `record` / `propose` + `decide`），只有「created_at 往回拨」与「没约下次的那条跟进」是仓储直写并在脚本里注明；`POST /review/answers` 本周重复作答改回 409
 
 ## 汇总
 
-- 增量数：**12**（阶段 A 6 个：T001 / T002 / T002b / T002c / T003 / T004；B 2 个；C 2 个；D 2 个）
-- 总预估：**76 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 6），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
-- 依赖关系：**T002 → T002b → T003**（阈值先校准、再让分拣链路用上校准值，避免拿拍脑袋的阈值去跑真实投料）；其余依赖不变：T001 → T002 / T005，T003 → T004，T004 + T005 + T006 + T008 → T009，T009 → T010。
+- 增量数：**13**（阶段 A 6 个：T001 / T002 / T002b / T002c / T003 / T004；B 2 个；C 2 个；D 3 个：T009a / T009b / T010）
+- 总预估：**80 小时**（6 + 9 + 3 + 2 + 9 + 6 + 6 + 8 + 6 + 5 + 10 + 4 + 6），不含真实模型联调与演示排练；每个增量结束按实际耗时回填。
+- 依赖关系：**T002 → T002b → T003**（阈值先校准、再让分拣链路用上校准值，避免拿拍脑袋的阈值去跑真实投料）；其余依赖不变：T001 → T002 / T005，T003 → T004，T004 + T005 + T006 + T008 → T009a，T009a → T009b → T010。
 - 排序原则：先数据层与迁移（T001，保证后面每一步都有地方落）→ 再按"分拣（含阈值校准）→ 卡片 → 分级 → 出库"的数据依赖推进 → 前端最后接（后端接口定型后再画页面）→ 最后换场并做全量验收。不勾完上一阶段不进下一阶段。
-- 并行机会：T002 与 T005 互不依赖，可并行；T002b 的 50 对标注样本可以提前单独标（纯人工，不占开发工时）；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次。
+- 并行机会：T002 与 T005 互不依赖，可并行；T002b 的 50 对标注样本可以提前单独标（纯人工，不占开发工时）；T009 的两个页面组（分拣台+客户 / 详情+复盘+设置）可由两人分头做，但共用 `api.js` 需先合并一次——实际落地时拆成了 T009a（导航 / 货架 / 详情）与 T009b（复盘 / 设置 / 导入）两个增量，省掉一次合并。

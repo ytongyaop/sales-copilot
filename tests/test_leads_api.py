@@ -74,10 +74,11 @@ def test_post_lead_unknown_template_returns_422(client: TestClient) -> None:
 
 
 def test_post_lead_blank_template_falls_back_to_default(client: TestClient) -> None:
+    """空白模板回落到 `DEFAULT_TEMPLATE`（T010 起是主演示模板 tob_enterprise）。"""
     response = client.post("/leads", json={**VALID, "template": "  "})
 
     assert response.status_code == 201, response.text
-    assert response.json()["template"] == "edu_training"
+    assert response.json()["template"] == "tob_enterprise"
 
 
 def test_get_leads_returns_created_items(client: TestClient) -> None:

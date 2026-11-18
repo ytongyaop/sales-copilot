@@ -49,7 +49,8 @@ const error = ref('')
 
 // 线索管理（新增 / 认领 / 释放）：都是 v1 就有的入口，折叠到页面下方。
 // CSV 导入挪到「设置」页（T009b）：货架只管看客户，导入属于配置动作。
-const form = ref({ name: '', contact: '', source: 'referral', owner: '', template: 'edu_training' })
+// 模板默认留空 = 交给后端的 `DEFAULT_TEMPLATE`（前端不认识「哪份是默认」，避免出现第二份默认值）。
+const form = ref({ name: '', contact: '', source: 'referral', owner: '', template: '' })
 const submitting = ref(false)
 const busyId = ref('')
 
@@ -327,6 +328,7 @@ onMounted(async () => {
         <label>
           模板
           <select v-model="form.template">
+            <option value="">默认模板（后端决定）</option>
             <option v-for="item in templates" :key="item.key" :value="item.key">
               {{ item.name }}
             </option>

@@ -1,0 +1,75 @@
+template: tob_enterprise
+name: ToB 企业销售
+# 主演示模板（v2 换场）：面向 4–10 人团队卖企业软件 / 设备的流程。
+# 行业叫法只在本文件与 data/knowledge/*.md 里出现，domain/ 与 services/ 一行都没有（ADR-0004）。
+thresholds:
+  # 企业单子回旋周期长：首响给 2 小时（教培 30 分钟），反馈窗口给半天，3 天没动静就该提醒。
+  first_response_minutes: 120
+  feedback_window_hours: 4
+  stale_followup_days: 3
+  zombie_ratio_max: 0.15
+# 归属漏斗阈值（T002c 口径）：由 scripts/calibrate_thresholds.py 写回，引擎运行时不读它，
+# 留在这里是为了「阈值怎么来的」可回查（同一份清单，不在别处另写一份数字）。
+matching:
+  l1_auto: 97
+  l1_review: 86
+# 分级口径（ADR-0008）：分档只由规则算，模型不参与打分；权重与阈值只从这里读。
+grading:
+  # 四维权重，和为 1.0：金额 / 紧迫度 / 决策清晰度 / 需求匹配度。
+  # 企业单子里「钱多少」和「多急」同样重要，决策链与匹配度次之。
+  weights: {amount: 0.3, urgency: 0.3, clarity: 0.2, fit: 0.2}
+  # 分档阈值：加权 ≥ a_min 且四维齐全 → A；≥ b_min → B；上下限跨档 → needs_info。
+  bands:
+    a_min: 0.75
+    b_min: 0.45
+  default_mode: propose        # propose（先提议后确认）| auto（直接采纳）
+# 今日待办（T007）：排序上限与「给什么价值」的候选文案。
+# week_days 是「一周内」这一档的窗口天数：只在这里配置，代码里不写死数字。
+todo:
+  values:
+    basic: 公司背景资料
+    needs: 同类客户案例
+    decision: 方案与报价区间说明
+    followup: 上次承诺的跟进
+  week_days: 7
+  max_items: 20
+flow:
+  - block: intake
+  - block: first_contact
+    label: 首次联系
+  - block: qualify
+    label: 需求确认
+  - block: appointment
+    label: 方案会
+  - block: proposal
+    label: 方案与报价
+  - block: close
+    label: 签约/关闭
+card:
+  sections:
+    basic:
+      label: 基础信息
+      fields:
+        - {key: company,  label: 公司全称, question: "对方公司全称是什么？"}
+        - {key: industry, label: 所属行业, question: "他们主要做什么业务？"}
+        - {key: size,     label: 公司规模, question: "大概多少人？"}
+    needs:
+      label: 需求与痛点
+      fields:
+        - {key: need,          label: 核心需求, question: "他们最想解决的问题是什么？"}
+        - {key: pain_strength, label: 痛点强度, question: "这个问题现在有多急？不解决会怎样？"}
+        - {key: our_fit,       label: 我方匹配点, question: "我们的哪一块正好对上？"}
+    decision:
+      label: 决策流程与预算
+      fields:
+        - {key: decision_maker, label: 决策者, question: "最后谁签字？"}
+        - {key: influencer,     label: 影响者, question: "还有谁的意见会影响决定？"}
+        - {key: approval_flow,  label: 决策流程, question: "他们内部走什么流程？招标还是议价？"}
+        - {key: budget_range,   label: 预算区间, question: "预算大概在什么范围？"}
+        - {key: procurement,    label: 采购方式, question: "走公开招标还是直接采购？"}
+    followup:
+      label: 跟进记录
+      fields:
+        - {key: next_step,       label: 下一步动作, question: "下次见面要谈什么？"}
+        - {key: customer_promise, label: 客户承诺, question: "客户答应做什么？"}
+        - {key: value_provided,  label: 本次提供的价值, question: "这次我们给了什么新东西？"}
