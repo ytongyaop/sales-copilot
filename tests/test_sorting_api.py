@@ -111,6 +111,22 @@ def test_get_batches_filters_by_status(client: TestClient) -> None:
     assert items[0]["confidence"] == 0.0
 
 
+def test_get_batches_reports_dropped_count(client: TestClient) -> None:
+    """列表每条带 `dropped_count`（整数）：假模型不编造出处，干净单就是 0。"""
+    lead_id = _lead_id(client)
+    _sort(client, PHONE_CONTENT, lead_id)
+    _sort(client, NEW_CONTENT)
+
+    response = client.get("/sorting/batches")
+
+    assert response.status_code == 200, response.text
+    items = response.json()
+    assert len(items) == 2
+    for item in items:
+        assert isinstance(item["dropped_count"], int)
+        assert item["dropped_count"] == 0
+
+
 def test_get_single_batch_keeps_model_text_and_parses_it(client: TestClient) -> None:
     """单条：既有模型原文（`suggestion_json`），也有解析后的视图。"""
     lead_id = _lead_id(client)

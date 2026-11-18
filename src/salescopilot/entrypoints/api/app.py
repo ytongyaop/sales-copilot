@@ -782,7 +782,8 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
 def list_sorting_batches(service: SortingDep, status: str | None = None, limit: int = 50):
     """分拣单列表（新→旧）：`status` 可过滤（如 `pending_claim` 即待认领池）。
 
-    每条带 `lead_name`（归属未定时为 null）；状态不认识或 `limit` 越界时 422。
+    每条带 `lead_name`（归属未定时为 null）与 `dropped_count`（丢了几条要素，整数）；
+    状态不认识或 `limit` 越界时 422。
     """
     items, issues = service.list_batches(status=status, limit=limit)
     if issues:

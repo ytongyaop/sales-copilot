@@ -608,7 +608,8 @@ class SortingService:
     def list_batches(
         self, *, status: str | None = None, limit: int = 50
     ) -> tuple[list[dict], list[ValidationIssue]]:
-        """分拣单列表（倒序）：可按状态过滤；每条带 `lead_name`（归属未定时为空）。"""
+        """分拣单列表（倒序）：可按状态过滤；每条带 `lead_name`（归属未定时为空）
+        与 `dropped_count`（投料时被丢弃的要素条数，供列表标「有丢弃」）。"""
         issues: list[ValidationIssue] = []
         if (
             isinstance(limit, bool)
@@ -640,7 +641,14 @@ class SortingService:
 
         names = {lead.id: lead.name for lead in self._leads.list()}
         wanted.sort(key=lambda item: item.created_at, reverse=True)
-        return [_summary(item, names.get(item.lead_id)) for item in wanted[:limit]], []
+        items: list[dict] = []
+        for item in wanted[:limit]:
+            body = _summary(item, names.get(item.lead_id))
+            # 列表只多一个「丢了几条」的整数：诊断正文留给单条接口，列表不必背着全文；
+            # 解析失败按 0（复用 `_loads_items` 的口径），一条坏 JSON 不该拖垮整页列表。
+            body["dropped_count"] = len(_loads_items(item.dropped_json))
+            items.append(body)
+        return items, []
 
     def get_batch(self, batch_id: str) -> tuple[dict | None, list[ValidationIssue]]:
         """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）

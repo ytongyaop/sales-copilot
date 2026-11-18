@@ -18,7 +18,7 @@ from salescopilot.adapters.db.sqlite import (
     SqliteSortingBatchRepository,
 )
 from salescopilot.adapters.llm.fake import FakeSorting
-from salescopilot.domain.models import INITIAL_STAGE, Lead
+from salescopilot.domain.models import INITIAL_STAGE, Lead, SortingBatch
 from salescopilot.services.sorting import SortingService
 
 # 带手机号：L0 精确键应命中下面那条线索。
@@ -143,6 +143,34 @@ def test_fabricated_span_is_dropped_from_the_suggestion(tmp_path: Path) -> None:
 
     # 审计要的是「模型当时吐了什么」：编造的那条仍在原始 JSON 里。
     assert "客户说下个月总部一定会批" in outcome.batch.suggestion_json
+
+
+def test_list_batches_reports_dropped_count(tmp_path: Path) -> None:
+    """列表带 `dropped_count`：数丢弃诊断的条数；`dropped_json` 坏掉按 0、不抛异常。"""
+    service, _judge, _raws, batches, lead = _service(tmp_path, bad_span=True)
+
+    outcome = service.sort(content=PHONE_CONTENT, source="paste", lead_id=lead.id)
+    assert outcome.batch is not None
+    assert len(outcome.dropped) == 1
+
+    batches.add(
+        SortingBatch(
+            id="batch-broken",
+            raw_id=outcome.batch.raw_id,
+            status="pending_review",
+            suggestion_json="{}",
+            confidence=0.0,
+            scorer="none",
+            created_at="2026-11-18T11:00:00+00:00",
+            dropped_json="{不是数组",
+        )
+    )
+
+    items, issues = service.list_batches()
+
+    assert issues == []
+    counted = {item["id"]: item["dropped_count"] for item in items}
+    assert counted == {outcome.batch.id: 1, "batch-broken": 0}
 
 
 def test_repeated_content_reuses_the_same_raw(tmp_path: Path) -> None:

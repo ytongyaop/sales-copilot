@@ -147,4 +147,41 @@ export function discardDraft(leadId, draftId) {
   return request(`/leads/${leadId}/drafts/${draftId}`, { method: 'DELETE' })
 }
 
+// ---------------------------------------------------------------- 分拣单
+
+// 投料：归属判不判得出来全由后端漏斗决定（精确键 / 灰区 / 新客户），
+// 前端只负责把原文、来源和「已指定的客户」如实发过去。
+export function sortContent({ content, source, leadId }) {
+  return request('/sorting', jsonOptions('POST', { content, source, lead_id: leadId || null }))
+}
+
+// 列表：`status` 留空就是全部；取值合不合法由后端判（不认识的状态回 422 + 中文原因）。
+export function listBatches(status) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return request(`/sorting/batches${query}`)
+}
+
+export function getBatch(id) {
+  return request(`/sorting/batches/${id}`)
+}
+
+// 处置：accept / fix / reject 的合法性（状态、理由、目标客户）全在后端判；
+// 成功回 `{batch, applied, skipped}`，前端只显示写了几条、跳过什么。
+export function confirmBatch(id, { action, lead_id, reason }) {
+  return request(
+    `/sorting/${id}/confirm`,
+    jsonOptions('POST', { action, lead_id: lead_id || null, reason: reason || null }),
+  )
+}
+
+// 认领：`{lead_id}` 挂已有客户，`{create_name}` 新建；两个都给或都不给由后端挡。
+export function claimBatch(id, payload) {
+  return request(`/sorting/${id}/claim`, jsonOptions('POST', payload))
+}
+
+// 复核只是「建议」：结果不落库，人点了采用才走 claim。
+export function reviewBatch(id) {
+  return request(`/sorting/${id}/review`)
+}
+
 export { OFFLINE_MESSAGE }
