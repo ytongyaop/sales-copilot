@@ -91,6 +91,14 @@ def test_post_sorting_returns_201_with_four_blocks(client: TestClient) -> None:
     assert suggestion["grading"]["value"] in ("A", "B", "C", "needs_info")
     assert suggestion["grading"]["reason"]
     assert suggestion["grading"]["basis"]
+    # 0.1.2：分拣单折叠区也要显示四维与短理由（与详情页同一套 grade_from_facts 结果）。
+    assert suggestion["grading"]["summary"]
+    assert "–" not in suggestion["grading"]["summary"], "短理由不带分数区间"
+    assert len(suggestion["grading"]["dims"]) == 4
+    assert {"amount", "urgency", "clarity", "fit"} == {
+        dim["key"] for dim in suggestion["grading"]["dims"]
+    }
+    assert 0.0 <= suggestion["grading"]["low"] <= suggestion["grading"]["high"] <= 1.0
     assert suggestion["grading_source"] == "rule"
     # 模型自报的那份单独放着：假模型只看要素覆盖度，可以跟规则结论不一样。
     assert suggestion["model_grading"]["value"] in ("A", "B", "C")
@@ -182,6 +190,10 @@ def test_get_batch_grading_equals_post_grading(client: TestClient) -> None:
 
     assert created["suggestion"]["grading"]["value"] == detail["suggestion"]["grading"]["value"]
     assert created["suggestion"]["grading"]["reason"] == detail["suggestion"]["grading"]["reason"]
+    assert created["suggestion"]["grading"]["summary"] == detail["suggestion"]["grading"]["summary"]
+    assert created["suggestion"]["grading"]["dims"] == detail["suggestion"]["grading"]["dims"]
+    assert created["suggestion"]["grading"]["low"] == detail["suggestion"]["grading"]["low"]
+    assert created["suggestion"]["grading"]["high"] == detail["suggestion"]["grading"]["high"]
     assert created["suggestion"]["model_grading"] == detail["suggestion"]["model_grading"]
     # 模型原文一个字都不改：解析回来还是它当时吐的那份。
     stored = json.loads(detail["suggestion_json"])

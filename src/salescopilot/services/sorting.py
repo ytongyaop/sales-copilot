@@ -242,15 +242,33 @@ class SortingService:
         spec = self._template_spec(lead_id) or self._default_template_spec()
         today = parse_iso_date(self._today())
         if spec is None or today is None:
+            reason = "模板未装配或时钟不是 YYYY-MM-DD，无法按规则分级"
             return {
                 "value": GRADE_NEEDS_INFO,
-                "reason": "模板未装配或时钟不是 YYYY-MM-DD，无法按规则分级",
+                "low": None,
+                "high": None,
+                "dims": [],
+                "summary": reason,
+                "reason": reason,
                 "basis": [],
             }
 
         result = grade_from_facts(spec, _facts_from_elements(elements, lead_id or ""), today=today)
         return {
             "value": result.value,
+            "low": round(result.low, 4),
+            "high": round(result.high, 4),
+            "dims": [
+                {
+                    "key": dim.key,
+                    "label": dim.label,
+                    "weight": dim.weight,
+                    "known": dim.known,
+                    "score": dim.score,
+                }
+                for dim in result.dims
+            ],
+            "summary": result.summary,
             "reason": result.reason,
             "basis": list(result.basis),
         }

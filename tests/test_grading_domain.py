@@ -130,6 +130,57 @@ def test_bounds_inside_b_band_gives_b() -> None:
     assert "落在 0.45–0.75 之间 → B" in result.reason
 
 
+# ------------------------------------------------------------ 短理由（summary）
+
+
+def test_summary_of_a_full_grade_has_weight_and_band_but_no_range() -> None:
+    """四维齐全：短理由带加权分与档位，且**不含分数区间**（区间只留在完整理由里）。"""
+    result = grade_from_facts(SPEC, _full_facts(), today=TODAY)
+
+    assert result.summary == "四维齐全，加权 1.00 → A"
+    assert "–" not in result.summary and "区间" not in result.summary
+
+
+def test_summary_of_a_missing_dim_says_what_to_fill() -> None:
+    """缺维度：短理由点名缺哪一项、要补完才能定档；完整理由里才有区间。"""
+    facts = [fact for fact in _full_facts() if fact.field != "amount"]
+
+    result = grade_from_facts(SPEC, facts, today=TODAY)
+
+    assert result.summary == "缺「成交金额」，需要补充后再定档"
+    assert "0.70–1.00" in result.reason
+    assert "0.70" not in result.summary
+
+
+def test_summary_of_b_band_with_one_unknown_says_which_dim() -> None:
+    """缺一维但上界也进不了 A（落在 B）：短理由说缺什么 + 已知信息落在 B 档。"""
+    facts = [
+        _fact("amount", "20万"),
+        _fact("appointment_at", (TODAY + timedelta(days=20)).isoformat()),
+        _fact("decision_maker", "王总"),
+    ]
+
+    result = grade_from_facts(SPEC, facts, today=TODAY)
+
+    assert result.value == "B"
+    assert result.summary == "缺「需求匹配度」，已知信息落在 B 档"
+
+
+def test_summary_of_c_band_uses_the_weighted_score_only() -> None:
+    """四维齐全的弱单：短理由是「加权 xx，低于 B 档」，没有上下界。"""
+    facts = [
+        _fact("amount", "5万"),
+        _fact("appointment_at", (TODAY + timedelta(days=60)).isoformat()),
+        _fact("decision_maker", "王总"),
+        _fact("need", "想换一套流程"),
+    ]
+
+    result = grade_from_facts(SPEC, facts, today=TODAY)
+
+    assert result.value == "C"
+    assert result.summary == "加权 0.41，低于 B 档"
+
+
 def test_bounds_inside_c_band_gives_c() -> None:
     """四维齐全但都很弱：上界已经低于 B 档下限 → C（缺什么都不会变）。"""
     facts = [

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   advanceLead,
   confirmDraft,
@@ -81,7 +81,7 @@ const editValue = ref('')
 const newFact = ref({ field: 'need', value: '' })
 
 // 信息卡每个字段的原文片段默认不显示（销售看结论就够）：悬停看提示，点「原文」才在行内展开。
-// 键是 `分区.字段`，与 `missingOf` 同一套键，展开状态互不干扰。
+// 键是 `分区.字段`，展开状态各区互不干扰。
 const openSpans = ref({})
 
 function spanOpen(sectionKey, fieldKey) {
@@ -108,29 +108,116 @@ const cardTotals = computed(() => {
   }
 })
 
-// 缺项索引：分区.字段 → 缺项（带「下次该问什么」的问题句），信息卡按它高亮。
-const missingIndex = computed(() => {
-  const map = {}
-  for (const item of (card.value && card.value.missing) || []) {
-    map[`${item.section}.${item.field}`] = item
-  }
-  return map
-})
+// 卡片顶部那一行汇总：共缺几项（数字来自后端 `missing`，前端不自己数）。
+const missingCount = computed(() => (card.value && card.value.missing.length) || 0)
 
-function missingOf(sectionKey, fieldKey) {
-  return missingIndex.value[`${sectionKey}.${fieldKey}`] || null
+// ---------------------------------------------------------------- 信息卡填写态
+// 一次只开一块：点标题或任一缺项就把这一块切成表单，其余分区保持只读。
+// 保存走的后端同一套 PATCH（逐字段），前端只负责「谁变了、变了几个」。
+const editingSection = ref('')
+const sectionForm = ref({})
+const sectionSaving = ref('')
+const sectionNotice = ref('')
+const sectionError = ref('')
+
+function sectionMissing(section) {
+  return Math.max(section.total - section.filled, 0)
 }
 
-// 当前档位与理由：档位取后端折好的 current（人工值优先），理由取最近一条留痕。
+function isComplete(section) {
+  return section.total > 0 && section.filled >= section.total
+}
+
+function sectionEditing(key) {
+  return editingSection.value === key
+}
+
+function startSection(section) {
+  if (sectionEditing(section.key)) return
+  const values = {}
+  for (const field of section.fields) values[field.key] = field.value || ''
+  sectionForm.value = values
+  sectionNotice.value = ''
+  sectionError.value = ''
+  editingSection.value = section.key
+}
+
+// 「完成」与 Esc 都走这里：退出填写态、恢复只读（没保存的输入跟着丢掉）。
+function cancelSection() {
+  editingSection.value = ''
+  sectionForm.value = {}
+  sectionNotice.value = ''
+  sectionError.value = ''
+}
+
+async function saveSection(section) {
+  const pending = []
+  for (const field of section.fields) {
+    const next = String(sectionForm.value[field.key] || '').trim()
+    // 空着 = 这次不填（后端也不接受空值）；没改就不发，省一次往返。
+    if (!next) continue
+    if (next === String(field.value || '').trim()) continue
+    pending.push([field.key, next])
+  }
+  if (pending.length === 0) {
+    sectionNotice.value = ''
+    sectionError.value = '这一块没有新的内容可保存'
+    return
+  }
+
+  sectionSaving.value = section.key
+  sectionError.value = ''
+  let saved = 0
+  try {
+    for (const [field, value] of pending) {
+      await patchFact(props.leadId, field, value)
+      saved += 1
+    }
+    await refreshCard()
+    sectionNotice.value = `已保存 ${saved} 项`
+  } catch (err) {
+    sectionError.value = saved > 0 ? `已保存 ${saved} 项，之后失败：${err.message}` : err.message
+  } finally {
+    sectionSaving.value = ''
+  }
+}
+
+// 顶部「共缺 N 项」：跳到第一个缺失分区并展开填写。
+async function jumpToFirstMissing() {
+  const first = (card.value && card.value.missing[0]) || null
+  if (!first) return
+  const section = (card.value.sections || []).find((item) => item.key === first.section)
+  if (!section) return
+  startSection(section)
+  await nextTick()
+  const el = document.getElementById(`card-section-${first.section}`)
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 function currentGrade() {
   return latest.value ? latest.value.current : 'unknown'
 }
 
-function currentReason() {
+// 抬头那一句：用后端给的**短理由**（`summary`，不带区间数字）。
+// 人工改判写下的原话留在历史表里，抬头只回答「按现在的事实是个什么结论」。
+function gradeSummary() {
   if (!latest.value) return ''
-  const record = latest.value.record
-  if (record && record.reason) return record.reason
-  return latest.value.result ? latest.value.result.reason : ''
+  const result = latest.value.result
+  if (result && result.summary) return result.summary
+  return result ? result.reason : ''
+}
+
+// 只刷新「信息卡 / 分级 / 事实」三份：补完一块后覆盖率、圆点与档位都要立刻变，
+// 但不该把跟进时间线、分级历史这些无关的东西重取一遍。
+async function refreshCard() {
+  const [cardBody, latestBody, factRows] = await Promise.all([
+    getLeadCard(props.leadId),
+    getGradingLatest(props.leadId),
+    listFacts(props.leadId),
+  ])
+  card.value = cardBody
+  latest.value = latestBody
+  facts.value = factRows
 }
 
 const timeline = computed(() => [...followups.value].reverse())
@@ -481,7 +568,7 @@ onMounted(async () => {
           <span class="muted">{{ lead.owner || '未分配（公海）' }}</span>
           <span class="stage">{{ stageLabel() }}</span>
         </div>
-        <p class="reason">{{ currentReason() }}</p>
+        <p class="reason">{{ gradeSummary() }}</p>
         <div class="head-bar">
           <div class="bar" :title="`信息卡覆盖 ${cardTotals.filled}/${cardTotals.total}`">
             <span class="bar-fill" :style="{ width: coverText }"></span>
@@ -540,7 +627,7 @@ onMounted(async () => {
             <span class="grade-badge" :class="gradeClass(currentGrade())">
               {{ gradeBadge(currentGrade()) }}
             </span>
-            <span class="grade-reason">{{ latest.result.reason }}</span>
+            <span class="grade-reason">{{ gradeSummary() }}</span>
           </p>
 
           <details class="calc">
@@ -633,38 +720,112 @@ onMounted(async () => {
         </h2>
         <p v-if="!card" class="hint">信息卡加载中…</p>
         <template v-else>
-          <div v-for="section in card.sections" :key="section.key" class="section">
-            <h3>
-              {{ sectionLabel(section.key, section.label) }}
-              <span class="muted">{{ section.filled }}/{{ section.total }}</span>
-            </h3>
-            <ul class="fields">
+          <!-- 顶部一行汇总：共缺几项；点一下 = 跳到第一个缺失分区并展开填写。 -->
+          <button
+            v-if="missingCount"
+            type="button"
+            class="missing-summary"
+            @click="jumpToFirstMissing"
+          >
+            <span class="dot"></span>
+            共缺 {{ missingCount }} 项，从这里开始补
+          </button>
+          <p v-else class="hint">这一张信息卡齐了 ✓</p>
+
+          <div
+            v-for="section in card.sections"
+            :key="section.key"
+            :id="`card-section-${section.key}`"
+            class="section"
+            :class="{ editing: sectionEditing(section.key) }"
+          >
+            <!-- 标题行：分区名 + 覆盖数 + 缺几项（有缺失才带橙点）。点它就是进入填写态。 -->
+            <button
+              type="button"
+              class="section-head"
+              :disabled="sectionSaving === section.key"
+              @click="startSection(section)"
+            >
+              <span class="section-title">{{ sectionLabel(section.key, section.label) }}</span>
+              <span class="section-count">{{ section.filled }}/{{ section.total }}</span>
+              <template v-if="sectionMissing(section)">
+                <span class="dot"></span>
+                <span class="missing-note">缺 {{ sectionMissing(section) }} 项</span>
+              </template>
+              <span v-else class="done">✓</span>
+              <span class="spacer"></span>
+              <span class="muted section-hint">
+                {{ sectionEditing(section.key) ? '填写中' : sectionMissing(section) ? '点击填写' : '已齐' }}
+              </span>
+            </button>
+
+            <!-- 只读态：已填 `标签：值`（带来源小徽标），缺失是「橙点 + 灰标签 + 点击补全」。 -->
+            <ul v-if="!sectionEditing(section.key)" class="fields">
               <li v-for="field in section.fields" :key="field.key" class="field-row">
-                <!-- 原文片段默认不显示：悬停整行有提示，点「原文」才在行内展开（排查时还拿得到）。 -->
-                <div class="field-line" :title="field.span ? `原文：「${field.span}」` : null">
-                  <span class="field-label">{{ field.label }}：</span>
-                  <span v-if="field.value" class="field-value">{{ field.value }}</span>
-                  <span v-else class="field-empty">未填</span>
-                  <span v-if="field.source" class="badge">{{ factSourceLabel(field) }}</span>
-                  <span v-if="field.locked" class="badge lock">已锁定</span>
-                  <button
-                    v-if="field.span"
-                    type="button"
-                    class="link-button span-toggle"
-                    :aria-expanded="spanOpen(section.key, field.key)"
-                    @click="toggleSpan(section.key, field.key)"
-                  >
-                    {{ spanOpen(section.key, field.key) ? '收起原文' : '原文' }}
-                  </button>
-                </div>
-                <p v-if="field.span && spanOpen(section.key, field.key)" class="quote span-text">
-                  「{{ field.span }}」
-                </p>
-                <p v-if="missingOf(section.key, field.key)" class="ask">
-                  问：{{ missingOf(section.key, field.key).question }}
-                </p>
+                <template v-if="field.value">
+                  <!-- 原文片段默认不显示：悬停整行有提示，点「原文」才在行内展开。 -->
+                  <div class="field-line" :title="field.span ? `原文：「${field.span}」` : null">
+                    <span class="field-label">{{ field.label }}：</span>
+                    <span class="field-value">{{ field.value }}</span>
+                    <span v-if="field.source" class="badge">{{ factSourceLabel(field) }}</span>
+                    <span v-if="field.locked" class="badge lock">已锁定</span>
+                    <button
+                      v-if="field.span"
+                      type="button"
+                      class="link-button span-toggle"
+                      :aria-expanded="spanOpen(section.key, field.key)"
+                      @click="toggleSpan(section.key, field.key)"
+                    >
+                      {{ spanOpen(section.key, field.key) ? '收起原文' : '原文' }}
+                    </button>
+                  </div>
+                  <p v-if="field.span && spanOpen(section.key, field.key)" class="quote span-text">
+                    「{{ field.span }}」
+                  </p>
+                </template>
+                <button
+                  v-else
+                  type="button"
+                  class="field-line field-missing"
+                  :title="field.question"
+                  @click="startSection(section)"
+                >
+                  <span class="dot"></span>
+                  <span class="field-label missing-label">{{ field.label }}</span>
+                  <span class="spacer"></span>
+                  <span class="click-hint">点击补全</span>
+                </button>
               </li>
             </ul>
+
+            <!-- 填写态：列出该区**所有**字段，已填的预填当前值，缺失的空着（占位是模板里的问题句）。
+                 输入框在保存时不禁用：禁用会让它失焦，Enter 连打第二项就得重新点一次。 -->
+            <div v-else class="section-form">
+              <label v-for="field in section.fields" :key="field.key" class="form-row">
+                <span class="form-label" :class="{ filled: field.value }">{{ field.label }}</span>
+                <input
+                  v-model="sectionForm[field.key]"
+                  type="text"
+                  :placeholder="field.question || '填写取值'"
+                  @keydown.enter.prevent="saveSection(section)"
+                  @keydown.esc.prevent="cancelSection"
+                />
+              </label>
+              <div class="row-actions form-actions">
+                <button
+                  type="button"
+                  :disabled="sectionSaving === section.key"
+                  @click="saveSection(section)"
+                >
+                  {{ sectionSaving === section.key ? '保存中…' : '保存' }}
+                </button>
+                <button type="button" class="ghost" @click="cancelSection">完成</button>
+                <span v-if="sectionNotice" class="saved-note">{{ sectionNotice }}</span>
+                <span v-if="isComplete(section)" class="done">这一块齐了 ✓</span>
+                <span class="muted">Enter 保存 · Esc 取消</span>
+              </div>
+              <p v-if="sectionError" class="error">{{ sectionError }}</p>
+            </div>
           </div>
         </template>
       </section>
@@ -1099,18 +1260,142 @@ h3 {
   font-size: 13px;
 }
 
-/* 未填的字段整行变浅，并挂一句「问：…」——缺什么、下次问什么，一眼能看到。 */
-.field-empty {
-  color: #b0b7bf;
-  font-style: italic;
-}
-
-.ask {
-  margin: 4px 0 0 12px;
-  padding-left: 8px;
-  border-left: 2px solid #f0d896;
+/* 未填的字段整行变浅并挂一个橙点——缺什么，一眼能看到；点它直接进填写态。 */
+.missing-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border: 1px solid #f0d896;
+  border-radius: 6px;
+  background: #fff8e6;
   color: #7a5b00;
   font-size: 13px;
+  cursor: pointer;
+}
+
+.missing-summary:hover {
+  background: #fff1cc;
+}
+
+.dot {
+  display: inline-block;
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f0a020;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.section-head:hover .section-title {
+  color: #1f6feb;
+}
+
+.section-title {
+  font-weight: 600;
+  color: #1f2328;
+}
+
+.section-count {
+  font-size: 12px;
+  color: #8a939d;
+}
+
+.missing-note {
+  font-size: 12px;
+  color: #b07000;
+}
+
+.section-hint {
+  font-size: 12px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.done {
+  font-size: 12px;
+  color: #17663a;
+}
+
+.field-missing {
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.field-missing:hover .click-hint {
+  color: #1f6feb;
+  text-decoration: underline;
+}
+
+.missing-label {
+  color: #8a939d;
+}
+
+.click-hint {
+  font-size: 12px;
+  color: #9aa2ab;
+}
+
+.section.editing {
+  background: #fffdf6;
+}
+
+.section-form {
+  margin: 6px 0 10px;
+  padding: 10px 12px;
+  border: 1px dashed #d0d7de;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.form-label {
+  flex: 0 0 110px;
+  font-size: 13px;
+  color: #8a939d;
+}
+
+.form-label.filled {
+  color: #57606a;
+}
+
+.form-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.saved-note {
+  font-size: 12px;
+  color: #17663a;
 }
 
 .quote {

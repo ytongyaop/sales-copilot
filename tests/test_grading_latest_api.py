@@ -66,6 +66,8 @@ def test_latest_snapshot_of_an_ungraded_lead(client: TestClient) -> None:
     assert body["current"] == "unknown"
     assert body["record"] is None
     assert body["result"]["value"] == "A"
+    assert body["result"]["summary"] == "四维齐全，加权 1.00 → A"
+    assert "–" not in body["result"]["summary"], "短理由不带分数区间"
     assert [dim["key"] for dim in body["result"]["dims"]] == ["amount", "urgency", "clarity", "fit"]
     assert all(dim["known"] for dim in body["result"]["dims"])
     # 只读：查一次不该多出一行留痕。

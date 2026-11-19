@@ -63,10 +63,11 @@ def test_propose_returns_grade_with_bounds_and_dims(client: TestClient) -> None:
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"value", "low", "high", "dims", "reason", "basis"}
+    assert set(body) == {"value", "low", "high", "dims", "summary", "reason", "basis"}
     assert body["value"] == "A"
     assert body["low"] == 1.0
     assert body["high"] == 1.0
+    assert body["summary"] == "四维齐全，加权 1.00 → A", "短理由给默认视图那一行用"
     assert [dim["key"] for dim in body["dims"]] == ["amount", "urgency", "clarity", "fit"]
     assert all(dim["known"] for dim in body["dims"])
     assert all(dim["weight"] > 0 for dim in body["dims"])

@@ -136,11 +136,13 @@ class DimScore:
 
 @dataclass(frozen=True)
 class GradingResult:
-    """一次分级的结果：档次 ＋ 分数区间 ＋ 四维明细 ＋ 中文理由 ＋ 原文依据。
+    """一次分级的结果：档次 ＋ 分数区间 ＋ 四维明细 ＋ 长短两句理由 ＋ 原文依据。
 
     - `low` / `high`：已知维度按实得分、未知维度按 0 / 满分算出的下界与上界；
       四维齐全时两者相等；
-    - `reason`：一句话说明「为什么是这个档」或「为什么待补全」；
+    - `summary`：**短理由**，一句话、不带分数区间，给默认视图那一行用
+      （例：`四维齐全，加权 0.80 → A` / `缺「成交金额」，需要补充后再定档`）；
+    - `reason`：完整理由，带上下界与分档门槛，展开「查看计算过程」时才看；
     - `basis`：参与打分的原文片段（去重，最多 `MAX_BASIS` 条），能回到事实的出处。
     """
 
@@ -148,6 +150,7 @@ class GradingResult:
     low: float
     high: float
     dims: list[DimScore]
+    summary: str
     reason: str
     basis: list[str]
 
@@ -209,6 +212,7 @@ def grade_from_facts(spec: dict, facts: list[Fact], *, today: date) -> GradingRe
         low=low,
         high=high,
         dims=dims,
+        summary=_summary(dims, value=value, low=low),
         reason=_reason(
             dims,
             low,
@@ -416,6 +420,37 @@ def _band_of(dims: list[DimScore], low: float, high: float, *, a_min: float, b_m
     if low >= b_min and high < a_min:
         return GRADE_B
     return GRADE_NEEDS_INFO
+
+
+def _summary(dims: list[DimScore], *, value: str, low: float) -> str:
+    """拼一句**短理由**：不带分数区间的数字，给默认视图那一行（列表 / 抬头）用。
+
+    缺维度时先说缺什么，再按已有结论说「补不补得动」：
+    - `缺「成交金额」，需要补充后再定档`（缺项可能改变结论，就是待补全）；
+    - `缺「需求匹配度」，已知信息落在 B 档`（上界也进不了 A，补全不会升档）；
+    - `缺「成交金额」，按已知信息不足以进 B 档`（上界已经在 B 档以下）。
+    四维齐全时说加权分与档位：`四维齐全，加权 0.80 → A` / `加权 0.52，落在 B 档`。
+    """
+    unknown = [dim for dim in dims if not dim.known]
+    missing = "、".join(f"「{dim.label}」" for dim in unknown)
+
+    if unknown:
+        if value == GRADE_NEEDS_INFO:
+            return f"缺{missing}，需要补充后再定档"
+        if value == GRADE_C:
+            return f"缺{missing}，按已知信息不足以进 B 档"
+        if value == GRADE_B:
+            return f"缺{missing}，已知信息落在 B 档"
+        return f"缺{missing}，已知信息已够 A 档"
+
+    if value == GRADE_A:
+        return f"四维齐全，加权 {low:.2f} → A"
+    if value == GRADE_B:
+        return f"加权 {low:.2f}，落在 B 档"
+    if value == GRADE_C:
+        return f"加权 {low:.2f}，低于 B 档"
+    # 四维齐全时上下界相等，理论上到不了这里；兜底给一句不带数字的话，别吐空串。
+    return "已知信息不足以定档"
 
 
 def _reason(

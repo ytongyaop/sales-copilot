@@ -482,9 +482,10 @@ def _card_body(card: Card) -> dict:
 
 
 def _grading_body(result: GradingResult) -> dict:
-    """一次分级的结果：档次、上下界、四维明细、中文理由与原文依据。
+    """一次分级的结果：档次、上下界、四维明细、短理由 / 完整理由与原文依据。
 
     `low` / `high` 保留 4 位小数：四维齐全时两者相等，跨档时人一眼看出「差哪一档」。
+    `summary` 是默认视图那一行用的短理由（不带区间数字），`reason` 是展开后的完整理由。
     """
     return {
         "value": result.value,
@@ -500,6 +501,7 @@ def _grading_body(result: GradingResult) -> dict:
             }
             for dim in result.dims
         ],
+        "summary": result.summary,
         "reason": result.reason,
         "basis": list(result.basis),
     }

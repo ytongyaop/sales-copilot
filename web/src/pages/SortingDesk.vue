@@ -528,7 +528,8 @@ watch(
           <div class="row-body">
             <p v-if="grading" class="row-main">
               <span class="grade-badge" :class="gradeClass(grading.value)">{{ gradeBadge(grading.value) }}</span>
-              <span class="row-reason">{{ grading.reason }}</span>
+              <!-- 默认视图只给「档位 + 短理由」（不带分数区间）；完整理由与四维在下面的判断依据里。 -->
+              <span class="row-reason">{{ grading.summary || grading.reason }}</span>
             </p>
             <p v-else class="muted">分级读不出来</p>
           </div>
@@ -592,15 +593,18 @@ watch(
                 「{{ item }}」
               </li>
             </ul>
-            <!-- 四维分解与分数区间：详情页 `GET /grading/latest` 有，分拣单接口目前不含这两项；
-                 后端补上就自动显示，前端不自己算任何分数。 -->
+            <!-- 四维分解与分数区间：0.1.2 起分拣单接口也带这两项（与详情页同一套规则结果），
+                 前端不自己算任何分数。 -->
             <div v-if="grading.dims && grading.dims.length" class="dims">
               <div v-for="dim in grading.dims" :key="dim.key" class="dim">
                 <span>{{ dim.label }}</span>
                 <span>{{ dim.known ? dim.score.toFixed(1) : '—' }}</span>
               </div>
             </div>
-            <p v-if="grading.low !== undefined && grading.high !== undefined" class="muted">
+            <p
+              v-if="typeof grading.low === 'number' && typeof grading.high === 'number'"
+              class="muted"
+            >
               分数区间 {{ Number(grading.low).toFixed(2) }} – {{ Number(grading.high).toFixed(2) }}
             </p>
           </template>
