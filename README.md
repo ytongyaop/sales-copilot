@@ -36,6 +36,8 @@ A sales process engine for small teams: composable flow blocks plus industry tem
 
 前置：Python ≥ 3.11（本项目实测 3.14.6）；Node 20+ 仅前端需要。先跑 A 就能看到完整界面——假模型，离线、0 成本。
 
+当前版本 0.1.3：分拣/信息卡/分级/待办/复盘；下一步 0.2.0 账号与归属。
+
 ### A. 假模型（0 成本，2 分钟）
 
 ```bash
@@ -131,12 +133,12 @@ tests/            70 个测试文件；默认全用假模型，不联网
 
 ```bash
 python -m ruff check .                    # All checks passed
-python -m pytest -q                       # 507 passed
+python -m pytest -q                       # 520 passed
 PYTHONPATH=src lint-imports               # Contracts: 3 kept, 0 broken
 cd web && npm run build                   # vite build 成功
 ```
 
-- **507 passed**：全部用例默认用假模型（`FakeLLM` / `FakeEmbedder`），CI 不联网、不调真模型、不花钱。
+- **520 passed**：全部用例默认用假模型（`FakeLLM` / `FakeEmbedder`），CI 不联网、不调真模型、不花钱。
 - **3 kept**：三条分层契约写在 `.importlinter`（layers / services-not-adapters / domain-leaf）。
 - **无行业词**：`tests/test_no_industry_words.py` 用 `tests/fixtures/industry_words.txt` 扫 `src/` 与 `tests/`，行业叫法只准出现在 `templates/*.yaml` 与 `data/knowledge/*.md`。
 - **模板校验**：`tests/test_templates.py` 对四份模板逐块校验，删块测试保证「积木真复用」。
@@ -155,11 +157,11 @@ cd web && npm run build                   # vite build 成功
 
 本项目是**工程样例与演示系统**，不是可直接投产的商业产品：不含真实账号体系与多租户隔离，不含审计合规、数据加密、备份恢复等生产必需项；AI 输出可能出错，任何对外使用前必须人工复核。作者不对因使用本代码导致的任何直接或间接损失负责。详见 [`LICENSE`](LICENSE)。
 
-## 版本（v0.1.0）
+## 版本（v0.1.3）
 
-当前版本 **0.1.0**：分拣 / 信息卡 / 分级 / 待办 / 复盘 + 五入口前端 + ToB 演示动线。版本号在 `src/salescopilot/__init__.py` 的 `__version__`，`GET /health` 会带 `"version"` 字段，部署方一眼能对上是哪个版本在跑。
+当前版本 **0.1.3**：分拣 / 信息卡 / 分级 / 待办 / 复盘 + 五入口前端 + ToB 演示动线，另含 0.1.1 降噪、0.1.2 人工补全体验、0.1.3 认领放宽。版本号在 `src/salescopilot/__init__.py` 的 `__version__`，`GET /health` 会带 `"version"` 字段，部署方一眼能对上是哪个版本在跑。
 
-后续计划（UI 降噪、人工补全体验、认领放宽、真实账号与归属）见 [`docs/进度.md`](docs/进度.md) 的「版本计划」。
+后续计划（真实账号与归属 0.2.0）见 [`docs/进度.md`](docs/进度.md) 的「版本计划」。
 
 ## English
 
@@ -170,7 +172,7 @@ A sales process engine for small sales teams (4–10 people). The pitch: turn "h
 - **Four industry templates** (ToB software/equipment, adult education, software outsourcing, building materials) prove the same engine runs another process by config only. Industry wording is banned from `src/` by a test.
 - **Stack**: Python 3.14 (requires ≥ 3.11) · FastAPI · Vue 3 + Vite · SQLite · Chroma · DeepSeek `deepseek-chat` · Alibaba Cloud `text-embedding-v3`.
 - **Quick start (fake models, offline, $0)**: `pip install -r requirements-dev.txt` → `python scripts/seed_demo.py` → `python scripts/build_index.py --fake --docs-dir data/knowledge/tob` → `PYTHONPATH=src python -m uvicorn salescopilot.entrypoints.api.app:app --port 8000`, plus `cd web && npm install && npm run dev`. Real models need `DEEPSEEK_API_KEY` + `DASHSCOPE_API_KEY` and `SALESCOPILOT_LIVE=1`; a missing key fails at startup instead of silently falling back.
-- **Quality gates**: `ruff check .` clean, `pytest -q` 507 passed (all fake models, CI never calls a model), 3 import-linter contracts kept, `npm run build` green.
+- **Quality gates**: `ruff check .` clean, `pytest -q` 520 passed (all fake models, CI never calls a model), 3 import-linter contracts kept, `npm run build` green.
 - **Demo data is fictional** (company names, contacts and the `1380000xxxx` phone numbers are invented). This is a reference implementation, not a production-ready product — review every AI output before use.
 
 ## License
