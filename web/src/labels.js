@@ -66,6 +66,18 @@ export const FIELD_LABELS = {
 // 来源徽标：后端只产这三种来源，前端只负责翻译。
 export const SOURCE_LABELS = { llm: 'AI', manual: '人工', rule: '规则' }
 
+// 归属打分来源（`domain/matching.py` 的 scorer）：只翻译，不重算任何分数。
+export const SCORER_LABELS = {
+  exact: '精确命中',
+  fuzzy: '字符串相近',
+  vector: '向量相近',
+  none: '未命中',
+}
+
+export function scorerLabel(value) {
+  return SCORER_LABELS[value] || value || '未命中'
+}
+
 // 待办 / 货架 / 详情页共用的档位文案：`needs_info` 是「待补全」，不是第三个正档。
 export const GRADE_LABELS = {
   A: 'A 类',

@@ -80,6 +80,19 @@ const editingField = ref('')
 const editValue = ref('')
 const newFact = ref({ field: 'need', value: '' })
 
+// 信息卡每个字段的原文片段默认不显示（销售看结论就够）：悬停看提示，点「原文」才在行内展开。
+// 键是 `分区.字段`，与 `missingOf` 同一套键，展开状态互不干扰。
+const openSpans = ref({})
+
+function spanOpen(sectionKey, fieldKey) {
+  return openSpans.value[`${sectionKey}.${fieldKey}`] === true
+}
+
+function toggleSpan(sectionKey, fieldKey) {
+  const key = `${sectionKey}.${fieldKey}`
+  openSpans.value = { ...openSpans.value, [key]: !openSpans.value[key] }
+}
+
 // 阶段推进与补字段
 const fieldFormOpen = ref(false)
 const fieldFormValues = ref({})
@@ -522,27 +535,39 @@ onMounted(async () => {
         <h2>分级</h2>
         <p v-if="!latest" class="hint">分级加载中…</p>
         <template v-else>
-          <div class="dims">
-            <div v-for="dim in latest.result.dims" :key="dim.key" class="dim">
-              <span class="dim-label">{{ dim.label }}</span>
-              <span class="tag" :class="dim.known ? 'known' : 'unknown'">
-                {{ dim.known ? '已知' : '未知' }}
-              </span>
-              <span class="dim-score">{{ dim.known ? dim.score.toFixed(1) : '—' }}</span>
-              <span class="muted dim-weight">权重 {{ formatPercent(dim.weight) }}</span>
-            </div>
-          </div>
-
-          <p class="band">
-            分数区间 <strong>{{ latest.result.low.toFixed(2) }} – {{ latest.result.high.toFixed(2) }}</strong>
-            <span class="muted">（按规则现算，跨档时需要补全维度）</span>
+          <!-- 默认只给「档位 + 一句话理由」；四维分解、分数区间与引用原文收进「查看计算过程」。 -->
+          <p class="grade-line">
+            <span class="grade-badge" :class="gradeClass(currentGrade())">
+              {{ gradeBadge(currentGrade()) }}
+            </span>
+            <span class="grade-reason">{{ latest.result.reason }}</span>
           </p>
-          <p class="reason">{{ latest.result.reason }}</p>
-          <ul v-if="latest.result.basis.length" class="basis">
-            <li v-for="(span, index) in latest.result.basis" :key="index" class="quote">
-              「{{ span }}」
-            </li>
-          </ul>
+
+          <details class="calc">
+            <summary>查看计算过程</summary>
+
+            <div class="dims">
+              <div v-for="dim in latest.result.dims" :key="dim.key" class="dim">
+                <span class="dim-label">{{ dim.label }}</span>
+                <span class="tag" :class="dim.known ? 'known' : 'unknown'">
+                  {{ dim.known ? '已知' : '未知' }}
+                </span>
+                <span class="dim-score">{{ dim.known ? dim.score.toFixed(1) : '—' }}</span>
+                <span class="muted dim-weight">权重 {{ formatPercent(dim.weight) }}</span>
+              </div>
+            </div>
+
+            <p class="band">
+              分数区间 <strong>{{ latest.result.low.toFixed(2) }} – {{ latest.result.high.toFixed(2) }}</strong>
+              <span class="muted">（按规则现算，跨档时需要补全维度）</span>
+            </p>
+            <p class="reason">{{ latest.result.reason }}</p>
+            <ul v-if="latest.result.basis.length" class="basis">
+              <li v-for="(span, index) in latest.result.basis" :key="index" class="quote">
+                「{{ span }}」
+              </li>
+            </ul>
+          </details>
 
           <div class="row-actions">
             <button type="button" :disabled="busy !== ''" @click="repropose">
@@ -615,14 +640,26 @@ onMounted(async () => {
             </h3>
             <ul class="fields">
               <li v-for="field in section.fields" :key="field.key" class="field-row">
-                <div class="field-line">
+                <!-- 原文片段默认不显示：悬停整行有提示，点「原文」才在行内展开（排查时还拿得到）。 -->
+                <div class="field-line" :title="field.span ? `原文：「${field.span}」` : null">
                   <span class="field-label">{{ field.label }}：</span>
                   <span v-if="field.value" class="field-value">{{ field.value }}</span>
                   <span v-else class="field-empty">未填</span>
                   <span v-if="field.source" class="badge">{{ factSourceLabel(field) }}</span>
                   <span v-if="field.locked" class="badge lock">已锁定</span>
-                  <span v-if="field.span" class="quote">「{{ field.span }}」</span>
+                  <button
+                    v-if="field.span"
+                    type="button"
+                    class="link-button span-toggle"
+                    :aria-expanded="spanOpen(section.key, field.key)"
+                    @click="toggleSpan(section.key, field.key)"
+                  >
+                    {{ spanOpen(section.key, field.key) ? '收起原文' : '原文' }}
+                  </button>
                 </div>
+                <p v-if="field.span && spanOpen(section.key, field.key)" class="quote span-text">
+                  「{{ field.span }}」
+                </p>
                 <p v-if="missingOf(section.key, field.key)" class="ask">
                   问：{{ missingOf(section.key, field.key).question }}
                 </p>
@@ -909,6 +946,37 @@ onMounted(async () => {
   font-size: 13px;
 }
 
+/* 分级默认那一行：档位徽标 + 一句话理由；徽标与文字之间的间距由 `.grade-badge` 的 margin 保证。 */
+.grade-line {
+  display: flex;
+  gap: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+/* 头部一行里徽标后面还有归属人 / 阶段，间距交给 `.head-main` 的 gap，不叠一层 margin。 */
+.head-main > .grade-badge {
+  margin-right: 0;
+}
+
+.grade-reason {
+  flex: 1;
+  min-width: 0;
+  color: #3d4653;
+}
+
+.calc {
+  margin: 4px 0 8px;
+}
+
+.calc > summary {
+  cursor: pointer;
+  color: #1f6feb;
+  font-size: 13px;
+}
+
 /* 四维分解：一行一维，已知/未知用色块区分，未知的分数显示「—」。 */
 .dims {
   display: grid;
@@ -1048,6 +1116,19 @@ h3 {
 .quote {
   color: #8a939d;
   font-size: 12px;
+}
+
+/* 「原文」小开关：用文字链接的样子，不跟字段值抢位置。 */
+.span-toggle {
+  color: #8a939d;
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+.span-text {
+  margin: 4px 0 0 12px;
+  padding-left: 8px;
+  border-left: 2px solid #e1e4e8;
 }
 
 .timeline {

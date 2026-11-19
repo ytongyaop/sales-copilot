@@ -11,7 +11,7 @@ import {
   reviewBatch,
   sortContent,
 } from '../api'
-import { gradeBadge, gradeClass } from '../labels'
+import { gradeBadge, gradeClass, scorerLabel } from '../labels'
 
 // 分拣台只做四件事：看今日待办、投料、看这张单、处置。四块判断（归属 / 要素 / 分级 / 出库）
 // 全在后端 domain/sorting.py；这里只翻译中文、显示后端给的原因，不复制任何规则。
@@ -86,9 +86,20 @@ const claimPick = ref({})
 const createPick = ref({})
 
 const suggestion = computed(() => (card.value ? card.value.suggestion : null))
-const confidenceText = computed(() =>
-  card.value ? `${Number(card.value.confidence).toFixed(1)} · ${card.value.scorer}` : '',
-)
+// 四行结论只读这几份派生值：要素最多露 3 条、分级只取档位与一句话理由，
+// 四维分解 / 分数区间 / 引用原文一律留在「查看判断依据」里展开（信息不删，只降噪）。
+const grading = computed(() => (suggestion.value ? suggestion.value.grading : null))
+const elements = computed(() => (suggestion.value && suggestion.value.elements) || [])
+const elementCount = computed(() => elements.value.length)
+const topElements = computed(() => elements.value.slice(0, 3))
+const candidates = computed(() => (card.value && card.value.lead_candidates) || [])
+// 归属那一行的小字：分数 + 打分来源（如「100 · 精确命中」）。分数不换算，只把 scorer 翻成中文。
+const matchText = computed(() => {
+  if (!card.value) return ''
+  const score = Number(card.value.confidence)
+  const text = Number.isFinite(score) ? String(Number(score.toFixed(1))) : '—'
+  return `${text} · ${scorerLabel(card.value.scorer)}`
+})
 const skippedText = computed(() => {
   const skipped = (cardResult.value && cardResult.value.skipped) || []
   return skipped.map((item) => `${fieldLabel(item.field)}：${item.reason}`).join('；')
@@ -476,84 +487,150 @@ watch(
     <section v-if="card" class="card">
       <div class="card-head">
         <span class="status" :class="card.status">{{ statusLabel(card.status) }}</span>
-        <strong>{{ card.lead_name || '未认出' }}</strong>
-        <span class="muted">置信度 {{ confidenceText }}</span>
       </div>
 
-      <div v-if="card.content" class="raw">
-        <h3>投料原文</h3>
-        <p class="raw-text">{{ card.content }}</p>
-      </div>
+      <!-- 结论优先：面向销售只看这四行就能处置；原文、引文、四维这类判断过程全收进下面的
+           「查看判断依据」（默认收起、可展开，留着排查用，不是删除）。 -->
+      <div class="conclusion">
+        <div class="conclusion-row">
+          <span class="row-label">归属</span>
+          <div class="row-body">
+            <p class="row-main">
+              <strong v-if="card.lead_name">{{ card.lead_name }}</strong>
+              <span v-else>未认出</span>
+              <span class="row-note">{{ matchText }}</span>
+            </p>
+            <p v-if="!card.lead_name" class="muted row-hint">
+              系统没有把握，先到下面「待认领池」认领
+            </p>
+          </div>
+        </div>
 
-      <div class="judge">
-        <section class="block">
-          <h3>归属</h3>
-          <p v-if="card.lead_name">命中客户：{{ card.lead_name }}</p>
-          <p v-else class="muted">没有确定归属：系统没有把握，先到下面「待认领池」认领</p>
-          <template v-if="card.lead_candidates && card.lead_candidates.length">
-            <p class="muted">归属候选：</p>
-            <ul class="candidates">
-              <li v-for="item in card.lead_candidates" :key="item.lead_id">
-                {{ item.name }}
-                <span class="muted">{{ Number(item.score).toFixed(1) }} · {{ item.scorer }}</span>
+        <div class="conclusion-row">
+          <span class="row-label">要素</span>
+          <div class="row-body">
+            <p v-if="elementCount" class="row-main">已补 {{ elementCount }} 项</p>
+            <ul v-if="elementCount" class="row-list">
+              <li v-for="(element, index) in topElements" :key="index">
+                {{ sectionLabel(element.card_section) }}·{{ fieldLabel(element.field) }}：
+                <strong>{{ element.value }}</strong>
               </li>
             </ul>
-          </template>
-          <p v-else class="muted">没有候选</p>
+            <p v-if="elementCount > topElements.length" class="muted row-hint">
+              还有 {{ elementCount - topElements.length }} 项，展开「查看判断依据」看全部
+            </p>
+            <p v-if="!elementCount" class="muted">没有一个要素能对上原文</p>
+          </div>
+        </div>
+
+        <div class="conclusion-row">
+          <span class="row-label">分级</span>
+          <div class="row-body">
+            <p v-if="grading" class="row-main">
+              <span class="grade-badge" :class="gradeClass(grading.value)">{{ gradeBadge(grading.value) }}</span>
+              <span class="row-reason">{{ grading.reason }}</span>
+            </p>
+            <p v-else class="muted">分级读不出来</p>
+          </div>
+        </div>
+
+        <div class="conclusion-row">
+          <span class="row-label">下一步</span>
+          <div class="row-body">
+            <p v-if="suggestion" class="row-main">
+              <strong>{{ suggestion.next_action.action }}</strong>
+            </p>
+            <p v-if="suggestion && suggestion.next_action.value_offered" class="row-note">
+              提供的价值：{{ suggestion.next_action.value_offered }}
+            </p>
+            <p v-if="!suggestion" class="muted">没有出库建议</p>
+          </div>
+        </div>
+      </div>
+
+      <details class="evidence">
+        <summary>查看判断依据</summary>
+
+        <section v-if="card.content" class="block">
+          <h3>投料原文</h3>
+          <p class="raw-text">{{ card.content }}</p>
         </section>
 
         <section class="block">
-          <h3>要素</h3>
-          <ul v-if="suggestion && suggestion.elements.length" class="elements">
-            <li v-for="(element, index) in suggestion.elements" :key="index">
-              <div>
-                {{ sectionLabel(element.card_section) }} · {{ fieldLabel(element.field) }}：
-                <strong>{{ element.value }}</strong>
-              </div>
-              <span class="quote">「{{ element.source_span }}」</span>
-            </li>
-          </ul>
+          <h3>要素明细（{{ elementCount }} 条）</h3>
+          <table v-if="elementCount">
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>值</th>
+                <th>来源</th>
+                <th>置信度</th>
+                <th>原文片段</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(element, index) in elements" :key="index">
+                <td>{{ sectionLabel(element.card_section) }}·{{ fieldLabel(element.field) }}</td>
+                <td>{{ element.value }}</td>
+                <td><span class="badge">模型抽取</span></td>
+                <td>
+                  {{ Number.isFinite(Number(element.confidence)) ? Number(element.confidence).toFixed(2) : '—' }}
+                </td>
+                <td class="quote">「{{ element.source_span }}」</td>
+              </tr>
+            </tbody>
+          </table>
           <p v-else class="muted">没有一个要素能对上原文</p>
         </section>
 
         <section class="block">
-          <h3>分级</h3>
-          <div v-if="suggestion" class="grading">
-            <span class="grade" :class="`grade-${(suggestion.grading.value || '').toLowerCase()}`">
-              {{ suggestion.grading.value || '—' }}
-            </span>
-            <div>
-              <p>{{ suggestion.grading.reason }}</p>
-              <ul class="basis">
-                <li v-for="(item, index) in suggestion.grading.basis" :key="index" class="quote">
-                  「{{ item }}」
-                </li>
-              </ul>
+          <h3>分级依据</h3>
+          <template v-if="grading">
+            <p>{{ grading.reason }}</p>
+            <ul v-if="grading.basis && grading.basis.length" class="basis">
+              <li v-for="(item, index) in grading.basis" :key="index" class="quote">
+                「{{ item }}」
+              </li>
+            </ul>
+            <!-- 四维分解与分数区间：详情页 `GET /grading/latest` 有，分拣单接口目前不含这两项；
+                 后端补上就自动显示，前端不自己算任何分数。 -->
+            <div v-if="grading.dims && grading.dims.length" class="dims">
+              <div v-for="dim in grading.dims" :key="dim.key" class="dim">
+                <span>{{ dim.label }}</span>
+                <span>{{ dim.known ? dim.score.toFixed(1) : '—' }}</span>
+              </div>
             </div>
-          </div>
+            <p v-if="grading.low !== undefined && grading.high !== undefined" class="muted">
+              分数区间 {{ Number(grading.low).toFixed(2) }} – {{ Number(grading.high).toFixed(2) }}
+            </p>
+          </template>
           <p v-else class="muted">分级读不出来</p>
         </section>
 
         <section class="block">
-          <h3>下一步</h3>
-          <p v-if="suggestion"><strong>{{ suggestion.next_action.action }}</strong></p>
-          <p v-if="suggestion && suggestion.next_action.value_offered" class="muted">
-            提供的价值：{{ suggestion.next_action.value_offered }}
-            <span v-if="modelOfferNote(suggestion)" class="model-note">
-              模型建议：{{ suggestion.next_action.model_value_offered }}
-            </span>
-          </p>
+          <h3>归属候选（{{ candidates.length }} 条）</h3>
+          <ul v-if="candidates.length" class="candidates">
+            <li v-for="item in candidates" :key="item.lead_id">
+              {{ item.name }}
+              <span class="muted">{{ Number(item.score).toFixed(1) }} · {{ scorerLabel(item.scorer) }}</span>
+            </li>
+          </ul>
+          <p v-else class="muted">没有候选</p>
         </section>
-      </div>
 
-      <details v-if="card.dropped && card.dropped.length" class="dropped">
-        <summary>丢弃诊断（{{ card.dropped.length }} 条）</summary>
-        <ul>
-          <li v-for="(item, index) in card.dropped" :key="index" class="muted">
-            第 {{ item.index === null || item.index === undefined ? '?' : item.index + 1 }} 条 ·
-            {{ item.reason }}
-          </li>
-        </ul>
+        <section v-if="card.dropped && card.dropped.length" class="block">
+          <h3>丢弃诊断（{{ card.dropped.length }} 条）</h3>
+          <ul>
+            <li v-for="(item, index) in card.dropped" :key="index" class="muted">
+              第 {{ item.index === null || item.index === undefined ? '?' : item.index + 1 }} 条 ·
+              {{ item.reason }}
+            </li>
+          </ul>
+        </section>
+
+        <p v-if="modelOfferNote(suggestion)" class="model-note">
+          模型建议的价值：{{ suggestion.next_action.model_value_offered }}（规则值以模板为准）
+        </p>
       </details>
 
       <div class="row-actions card-actions">
@@ -825,11 +902,109 @@ watch(
   color: #57606a;
 }
 
-.judge {
+/* 四行结论：标签固定宽度在左，值在右；尾巴上的小字只做注解，不抢视线。 */
+.conclusion {
   border-top: 1px solid #eef1f4;
 }
 
-/* 四个判断分块：用浅色横线隔开，读的时候一眼知道「这是另一块判断」。 */
+.conclusion-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid #eef1f4;
+}
+
+.conclusion-row:last-child {
+  border-bottom: 0;
+}
+
+.row-label {
+  flex: none;
+  width: 44px;
+  color: #57606a;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.8;
+}
+
+.row-body {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.row-main {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0;
+  line-height: 1.8;
+}
+
+/* 容器已经有 8px 的 gap，徽标自带的 margin-right 在这里清零，间距仍是 8px 而不是 16px。 */
+.row-main > .grade-badge,
+.todo-row > .grade-badge {
+  margin-right: 0;
+}
+
+.row-note {
+  margin: 2px 0 0;
+  color: #8a939d;
+  font-size: 12px;
+}
+
+.row-reason {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.row-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.row-list {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  font-size: 13px;
+  color: #3d4653;
+  line-height: 1.8;
+}
+
+/* 判断依据：默认收起；展开后是排查用的全量材料（原文 / 要素明细 / 分级依据 / 候选 / 丢弃）。 */
+.evidence {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid #eef1f4;
+}
+
+.evidence > summary {
+  cursor: pointer;
+  color: #1f6feb;
+  font-size: 13px;
+}
+
+.dims {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.dim {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  background: #fafbfc;
+  font-size: 13px;
+}
+
 .block {
   padding: 10px 0;
   border-bottom: 1px solid #eef1f4;
@@ -850,21 +1025,12 @@ watch(
   margin: 0 0 4px;
 }
 
-.elements,
 .basis {
   margin: 0;
-  padding-left: 18px;
-  font-size: 14px;
-  line-height: 1.9;
-}
-
-.elements li {
-  margin-bottom: 4px;
-}
-
-.basis {
   padding-left: 0;
   list-style: none;
+  font-size: 14px;
+  line-height: 1.9;
 }
 
 .quote {
@@ -873,60 +1039,8 @@ watch(
 }
 
 .model-note {
-  display: block;
-  margin-top: 2px;
   color: #a2aab3;
   font-size: 12px;
-}
-
-.grading {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.grade {
-  flex: none;
-  width: 44px;
-  height: 44px;
-  line-height: 44px;
-  border-radius: 8px;
-  text-align: center;
-  font-size: 22px;
-  font-weight: 700;
-  background: #eef1f4;
-  color: #3d4653;
-}
-
-.grade-a {
-  background: #e7f6ec;
-  color: #17663a;
-}
-
-.grade-b {
-  background: #fff4d6;
-  color: #7a5b00;
-}
-
-.grade-c {
-  background: #eef1f4;
-  color: #57606a;
-}
-
-.dropped {
-  margin-top: 10px;
-  font-size: 13px;
-}
-
-.dropped summary {
-  cursor: pointer;
-  color: #57606a;
-}
-
-.dropped ul {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  line-height: 1.7;
 }
 
 .card-actions {
@@ -988,19 +1102,7 @@ watch(
   color: #b35900;
 }
 
-/* 投料原文：保留换行，读的时候不把几段话糊成一行。 */
-.raw {
-  padding: 10px 0;
-  border-bottom: 1px solid #eef1f4;
-}
-
-.raw h3 {
-  margin: 0 0 6px;
-  font-size: 13px;
-  color: #57606a;
-  font-weight: 600;
-}
-
+/* 投料原文：保留换行，读的时候不把几段话糊成一行（只在「查看判断依据」里出现）。 */
 .raw-text {
   margin: 0;
   padding: 8px 10px;

@@ -116,15 +116,24 @@ th {
   color: #7a5b00;
 }
 
-/* 档位徽标：四个页签看到的是同一套配色（A 绿 / B 黄 / C 灰 / 未分级浅灰）。 */
+/* 档位徽标：四个页签看到的是同一套配色（A 绿 / B 黄 / C 灰 / 未分级浅灰）。
+   两条硬约束，缺一条窄屏就会压住旁边的字：
+   - `flex: none` + `white-space: nowrap`：徽标不参与收缩、内部不换行，宽度永远撑得住文案；
+     容器放不下时徽标整体折到下一行，而不是把「待补全」三个字挤出来盖住后面的文字；
+   - `margin-right: 8px`：徽标与后面的文字之间恒定留 8px（不依赖使用方的 gap）。 */
 .grade-badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
   min-width: 22px;
-  padding: 1px 8px;
+  padding: 2px 8px;
+  margin-right: 8px;
   border-radius: 10px;
   border: 1px solid transparent;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1.5;
   text-align: center;
   white-space: nowrap;
 }
