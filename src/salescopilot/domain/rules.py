@@ -30,6 +30,10 @@ from salescopilot.domain.models import (
 MIN_CONTACT_LEN = 5
 CONTACT_TOO_SHORT = "联系方式至少需要 5 个字符"
 
+# 联系方式**可以为空**（0.1.3）：真实聊天记录常常只有一个称呼与单位，拿不到电话。
+# 客户照建，只是提醒人去补——这条文案同时给新建线索与分拣单认领用，两边不各写一句。
+MISSING_CONTACT_WARNING = "没有联系方式，客户已建但无法触达，请后续补录"
+
 # 线索字段取值的长度上限：与事实取值同一口径（`domain/facts.py` 的 MAX_FACT_VALUE_LEN）。
 MAX_FIELD_VALUE_LEN = 200
 
@@ -52,33 +56,61 @@ class ValidationIssue:
     message: str
 
 
-def validate_new_lead(*, name: str, contact: str, source: str) -> list[ValidationIssue]:
-    """校验一条待新建线索的入参；空列表表示可以落库。
+@dataclass(frozen=True)
+class LeadCheck:
+    """新建线索的校验结果：`errors` 拦住落库，`warnings` 只提醒、不拦。
 
-    规则：三个字段去掉首尾空格后都不能为空；`contact` 去空格后至少 5 个字符；
-    `source` 必须在 `ALLOWED_SOURCES` 里。问题逐条返回，不抛异常、不落库。
+    分开的理由（0.1.3）：真实聊天记录常常只提到人名或单位，联系方式要后面才补；
+    「建是能建、但缺了什么」不该和「存不下」混在同一张列表里，
+    否则前端要么把提醒当错误显示，要么把错误当提醒放过去。
     """
-    issues: list[ValidationIssue] = []
+
+    errors: list[ValidationIssue]
+    warnings: list[ValidationIssue]
+
+
+def check_new_lead(*, name: str, contact: str, source: str) -> LeadCheck:
+    """校验一条待新建线索的入参：错误（不许落库）与提醒（照建、但要补）分开返回。
+
+    规则：
+    1. `name` 去空格后至少要 1 个字——**这是唯一的主要条件**：只剩一个称呼也能建客户；
+    2. `contact` **可以为空**：为空只给一条提醒（`MISSING_CONTACT_WARNING`），不拦落库；
+       写了就必须去空格后至少 `MIN_CONTACT_LEN` 个字符（挡住「139」这种半截号）；
+    3. `source` 必须在 `ALLOWED_SOURCES` 里。
+
+    问题逐条返回，不抛异常、不落库。
+    """
+    errors: list[ValidationIssue] = []
+    warnings: list[ValidationIssue] = []
 
     if not name.strip():
-        issues.append(ValidationIssue("name", "名称不能为空"))
+        errors.append(ValidationIssue("name", "名称不能为空"))
 
-    stripped_contact = contact.strip()
+    stripped_contact = contact.strip() if isinstance(contact, str) else ""
     if not stripped_contact:
-        issues.append(ValidationIssue("contact", "联系方式不能为空"))
+        warnings.append(ValidationIssue("contact", MISSING_CONTACT_WARNING))
     elif len(stripped_contact) < MIN_CONTACT_LEN:
-        issues.append(ValidationIssue("contact", CONTACT_TOO_SHORT))
+        errors.append(ValidationIssue("contact", CONTACT_TOO_SHORT))
 
     stripped_source = source.strip()
     allowed = "、".join(ALLOWED_SOURCES)
     if not stripped_source:
-        issues.append(ValidationIssue("source", "来源不能为空"))
+        errors.append(ValidationIssue("source", "来源不能为空"))
     elif stripped_source not in ALLOWED_SOURCES:
-        issues.append(
+        errors.append(
             ValidationIssue("source", f"来源必须是以下之一：{allowed}（实际是 {stripped_source}）")
         )
 
-    return issues
+    return LeadCheck(errors=errors, warnings=warnings)
+
+
+def validate_new_lead(*, name: str, contact: str, source: str) -> list[ValidationIssue]:
+    """向后兼容入口：只返回错误（有错误就不能落库）。
+
+    提醒（例如联系方式为空）请走 `check_new_lead`——老调用方只看「能不能落库」，
+    不会因为多了一句提醒就误判成失败。
+    """
+    return check_new_lead(name=name, contact=contact, source=source).errors
 
 
 def validate_template_key(template: str, allowed: Collection[str]) -> list[ValidationIssue]:

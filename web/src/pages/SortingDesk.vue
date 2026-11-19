@@ -83,7 +83,10 @@ const listsLoaded = ref(false)
 const panel = ref({ id: '', mode: '' })
 const reviewInfo = ref({})
 const claimPick = ref({})
+// 待认领池的「新建并认领」输入框：默认填后端建议的新客户名（`suggested_new_name`）。
 const createPick = ref({})
+// 每个输入框的 DOM 引用：建议名为空时点主按钮，要能把光标送进这个框。
+const createInputs = ref({})
 
 const suggestion = computed(() => (card.value ? card.value.suggestion : null))
 // 四行结论只读这几份派生值：要素最多露 3 条、分级只取档位与一句话理由，
@@ -192,12 +195,27 @@ async function loadLists() {
       Promise.all([listBatches('pending_claim'), listBatches()]),
     )
     pool.value = poolItems
+    seedCreateNames(poolItems)
     recent.value = allItems.slice(0, 10)
   } catch (err) {
     error.value = err.message
   } finally {
     listsLoaded.value = true
   }
+}
+
+// 输入框默认填后端建议的客户名：只在第一次见到这张单时填，人改过的那份不被列表刷新覆盖。
+function seedCreateNames(items) {
+  const next = { ...createPick.value }
+  for (const item of items) {
+    if (next[item.id] === undefined) next[item.id] = item.suggested_new_name || ''
+  }
+  createPick.value = next
+}
+
+function setCreateInput(id, el) {
+  if (el) createInputs.value[id] = el
+  else delete createInputs.value[id]
 }
 
 // -------------------------------------------------------------- 投料
@@ -330,16 +348,19 @@ async function openReview(item) {
   }
 }
 
-async function claimItem(item, payload, label) {
+async function claimItem(item, payload, label, { reminder = false } = {}) {
   busy.value = `claim:${item.id}`
   error.value = ''
   notice.value = ''
   try {
     const body = await claimBatch(item.id, payload)
     const warnings = (body.warnings || []).map((warning) => warning.message).join('；')
-    notice.value = `${label}，状态改为待复核（还要接受一次才把要素写进事实）${
-      warnings ? `｜提醒：${warnings}` : ''
-    }`
+    // 新建客户走的是「一句话说清结果」：提醒原样贴在后端那句话后面，不自己改写。
+    notice.value = reminder
+      ? `${label}${warnings ? `（提醒：${warnings}）` : ''}`
+      : `${label}，状态改为待复核（还要接受一次才把要素写进事实）${
+          warnings ? `｜提醒：${warnings}` : ''
+        }`
     if (card.value && card.value.id === item.id) card.value = body.batch
     panel.value = { id: '', mode: '' }
     await loadLists()
@@ -363,10 +384,16 @@ function claimExisting(item) {
   return claimItem(item, { lead_id: leadId }, `已认领到「${leadName(leadId)}」`)
 }
 
+// 待认领池的主操作：按（可改的）名字新建客户并认领。
+// 名字为空就只把光标送进那个框，不向后端发一次注定 422 的请求。
 function createLeadAndClaim(item) {
   const name = (createPick.value[item.id] || '').trim()
-  if (!name) return
-  return claimItem(item, { create_name: name }, `已按「${name}」新建客户并认领`)
+  if (!name) {
+    const input = createInputs.value[item.id]
+    if (input) input.focus()
+    return
+  }
+  return claimItem(item, { create_name: name }, `已新建「${name}」并认领`, { reminder: true })
 }
 
 // -------------------------------------------------------------- 从列表回放一张单
@@ -708,10 +735,32 @@ watch(
           <div class="pool-head">
             <span class="muted">{{ formatTime(item.created_at) }}</span>
             <span class="pool-text">{{ preview(item) }}</span>
+            <span v-if="item.suggested_new_name" class="badge">
+              建议新建：{{ item.suggested_new_name }}
+            </span>
             <span v-if="item.dropped_count" class="badge warn">有丢弃 {{ item.dropped_count }}</span>
           </div>
 
+          <!-- 主操作：按名字新建客户并认领。名字默认是后端建议值，人可以直接改。 -->
+          <div class="pool-create">
+            <input
+              :ref="(el) => setCreateInput(item.id, el)"
+              v-model="createPick[item.id]"
+              type="text"
+              placeholder="新客户名称（可改）"
+            />
+            <button type="button" :disabled="busy !== ''" @click="createLeadAndClaim(item)">
+              {{ busy === `claim:${item.id}` ? '处理中…' : '新建并认领' }}
+            </button>
+            <span v-if="!(createPick[item.id] || '').trim()" class="muted">
+              填一个客户名就能建
+            </span>
+          </div>
+
           <div class="row-actions">
+            <button type="button" class="ghost" :disabled="busy !== ''" @click="togglePanel(item.id, 'claim')">
+              认领到已有客户
+            </button>
             <button
               type="button"
               class="ghost"
@@ -719,12 +768,6 @@ watch(
               @click="openReview(item)"
             >
               {{ busy === `review:${item.id}` ? '处理中…' : '复核候选' }}
-            </button>
-            <button type="button" class="ghost" :disabled="busy !== ''" @click="togglePanel(item.id, 'claim')">
-              认领到已有客户
-            </button>
-            <button type="button" class="ghost" :disabled="busy !== ''" @click="togglePanel(item.id, 'create')">
-              新建客户
             </button>
           </div>
 
@@ -760,17 +803,6 @@ watch(
               @click="claimExisting(item)"
             >
               {{ busy === `claim:${item.id}` ? '处理中…' : '认领' }}
-            </button>
-          </div>
-
-          <div v-if="panel.id === item.id && panel.mode === 'create'" class="panel-form row-actions">
-            <input v-model="createPick[item.id]" type="text" placeholder="新客户名称" />
-            <button
-              type="button"
-              :disabled="(createPick[item.id] || '').trim() === ''"
-              @click="createLeadAndClaim(item)"
-            >
-              {{ busy === `claim:${item.id}` ? '处理中…' : '新建并认领' }}
             </button>
           </div>
         </li>
@@ -1099,6 +1131,28 @@ watch(
 .pool-text {
   flex: 1;
   min-width: 200px;
+}
+
+/* 待认领池的主操作行：名字输入框 + 主色按钮 + 为空时的一句提示。 */
+.pool-create {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pool-create input {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #1f2328;
+}
+
+.pool-create .muted {
+  font-size: 12px;
 }
 
 .badge.warn {

@@ -6,7 +6,7 @@
 
 import uuid
 from collections.abc import Callable, Collection
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
@@ -14,9 +14,9 @@ from salescopilot.domain.ports import LeadRepository
 from salescopilot.domain.rules import (
     ValidationIssue,
     allowed_lead_fields,
+    check_new_lead,
     merge_fields,
     validate_lead_fields,
-    validate_new_lead,
     validate_template_key,
 )
 
@@ -24,6 +24,20 @@ from salescopilot.domain.rules import (
 def utc_now_iso() -> str:
     """默认时钟：UTC 的 ISO8601 字符串（秒精度）。"""
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+@dataclass(frozen=True)
+class LeadCreation:
+    """一次新建线索的结果：实体 + 提醒（`lead` 为 None 表示被错误拦下）。
+
+    - `lead` 不是 None：已经落库；`warnings` 是「建成了但要人补」的提醒
+      （例如没有联系方式），不阻碍落库；
+    - `lead` 是 None：一条都没写，`issues` 说明为什么。
+    """
+
+    lead: Lead | None
+    issues: list[ValidationIssue] = field(default_factory=list)
+    warnings: list[ValidationIssue] = field(default_factory=list)
 
 
 class LeadService:
@@ -55,12 +69,38 @@ class LeadService:
         owner: str | None = None,
         template: str = DEFAULT_TEMPLATE,
     ) -> Lead | list[ValidationIssue]:
-        """新建一条线索；校验失败返回问题列表，成功返回落库后的实体。"""
+        """新建一条线索；校验失败返回问题列表，成功返回落库后的实体。
+
+        兼容外壳：只要实体、不要提醒的调用方继续用它。要拿「建成了但要补什么」
+        （例如联系方式为空）请用 `create_lead`——提醒不会混进这里的错误列表。
+        """
+        outcome = self.create_lead(
+            name=name, contact=contact, source=source, owner=owner, template=template
+        )
+        if outcome.lead is None:
+            return outcome.issues
+        return outcome.lead
+
+    def create_lead(
+        self,
+        *,
+        name: str,
+        contact: str,
+        source: str,
+        owner: str | None = None,
+        template: str = DEFAULT_TEMPLATE,
+    ) -> LeadCreation:
+        """新建一条线索，把「错误」与「提醒」分开带回去。
+
+        - 有错误（名称空、联系方式半截、来源不认识、模板未知）→ 一条都不写，`lead` 为 None；
+        - 没错误 → 落库，`warnings` 里可能带「没有联系方式，客户已建但无法触达，请后续补录」。
+        """
         resolved_template = (template or "").strip() or DEFAULT_TEMPLATE
-        issues = validate_new_lead(name=name, contact=contact, source=source)
+        check = check_new_lead(name=name, contact=contact, source=source)
+        issues = list(check.errors)
         issues.extend(validate_template_key(resolved_template, self._allowed_templates))
         if issues:
-            return issues
+            return LeadCreation(lead=None, issues=issues)
 
         lead = Lead(
             id=str(uuid.uuid4()),
@@ -73,7 +113,7 @@ class LeadService:
             template=resolved_template,
         )
         self._repo.add(lead)
-        return lead
+        return LeadCreation(lead=lead, warnings=list(check.warnings))
 
     def list(self) -> list[Lead]:
         """全部线索，按创建时间倒序（顺序由仓储实现保证）。"""

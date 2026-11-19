@@ -20,6 +20,7 @@ from salescopilot.adapters.db.sqlite import (
 )
 from salescopilot.adapters.llm.fake import FakeSorting
 from salescopilot.domain.models import DEFAULT_TEMPLATE, INITIAL_STAGE, Lead
+from salescopilot.domain.rules import MISSING_CONTACT_WARNING
 from salescopilot.services.sorting import SortingService
 
 # 没有任何候选：判为新客户候选，进待认领池。
@@ -126,6 +127,26 @@ def test_claim_with_create_name_without_contact_warns_and_leaves_it_empty(
     assert [issue.location for issue in issues] == ["contact"]
     created = setup.leads.get(batch.lead_id)
     assert created is not None
+    assert created.contact == ""
+
+
+def test_claim_create_name_warning_tells_how_to_fix(tmp_path: Path) -> None:
+    """只有名字也能建（0.1.3）：提醒原文说明「客户已建但无法触达、请后续补录」。
+
+    文案与 `POST /leads` 共用同一条常量（`MISSING_CONTACT_WARNING`），前端原样展示。
+    """
+    setup = _setup(tmp_path)
+    batch_id = _pending_claim(setup, NEW_CONTENT)
+
+    batch, warnings = setup.service.claim(batch_id, create_name="张总")
+
+    assert batch is not None
+    assert batch.status == "pending_review"
+    assert [warning.location for warning in warnings] == ["contact"]
+    assert warnings[0].message == MISSING_CONTACT_WARNING
+    created = setup.leads.get(batch.lead_id)
+    assert created is not None
+    assert created.name == "张总"
     assert created.contact == ""
 
 

@@ -59,6 +59,7 @@ from salescopilot.domain.ports import (
 from salescopilot.domain.rules import (
     CONTACT_TOO_SHORT,
     MIN_CONTACT_LEN,
+    MISSING_CONTACT_WARNING,
     ValidationIssue,
     _is_iso_date,
     merge_fields,
@@ -73,6 +74,7 @@ from salescopilot.domain.sorting import (
     normalized_org,
     org_name_candidates,
     split_diagnostic,
+    suggested_new_name,
     validate_decision_reason,
     validate_elements,
 )
@@ -127,7 +129,9 @@ class SortingOutcome:
     - `lead_candidates` 是这次落库的归属候选（`batch.candidates_json` 的同一份内容，
       已是 `{"lead_id", "name", "score", "scorer"}` 字典）；路由直接回给前端，不用再解析 JSON；
     - `model_grading` 是模型原文里那份 `grading`（只做形状兜底，内容一字不改）：
-      给人看的档位在 `suggestion.grading`，这一份只用于对比与审计。
+      给人看的档位在 `suggestion.grading`，这一份只用于对比与审计；
+    - `suggested_new_name` 是「新建客户时建议用的名字」：从基础信息要素里取，
+      取不到就是空串。只作建议、不落库（0.1.3）。
     """
 
     batch: SortingBatch | None
@@ -136,6 +140,7 @@ class SortingOutcome:
     dropped: list[dict] = field(default_factory=list)
     lead_candidates: list[dict] = field(default_factory=list)
     model_grading: dict | None = None
+    suggested_new_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -376,7 +381,14 @@ class SortingService:
             next_action=next_action,
         )
         return SortingOutcome(
-            batch, [], suggestion, dropped, candidate_payload, _model_grading(result.payload)
+            batch,
+            [],
+            suggestion,
+            dropped,
+            candidate_payload,
+            _model_grading(result.payload),
+            # 新建客户名建议：与 `GET /sorting/batches/{id}` 用同一个函数、同一批要素。
+            suggested_new_name=suggested_new_name(elements),
         )
 
     # -------------------------------------------------------------- 归属漏斗
@@ -824,18 +836,20 @@ class SortingService:
         return patch
 
     def _contact_for_claim(self, batch: SortingBatch) -> tuple[str, list[ValidationIssue]]:
-        """认领新建客户时取联系方式：只从已过出处校验的要素里找，找不到就留空并提示。"""
+        """认领新建客户时取联系方式：只从已过出处校验的要素里找，找不到就留空并提醒。
+
+        联系方式**不是**认领的前置条件（0.1.3）：真实聊天记录里常常没留电话，
+        客户照建，提醒人后面补录——文案与 `POST /leads` 共用同一条常量。
+        """
         raw = self._raws.get(batch.raw_id)
         if raw is None:
-            return "", [ValidationIssue("contact", "原文不存在，新客户的联系方式留空，请补录")]
+            return "", [ValidationIssue("contact", MISSING_CONTACT_WARNING)]
 
         payload = _loads(batch.suggestion_json) or {}
         elements, _diagnostics = validate_elements(raw.content, payload.get("elements"))
         contact = contact_from_elements(elements)
         if not contact:
-            return "", [
-                ValidationIssue("contact", "要素里没有联系方式，客户已建但联系方式留空，请补录")
-            ]
+            return "", [ValidationIssue("contact", MISSING_CONTACT_WARNING)]
         if len(contact) < MIN_CONTACT_LEN:
             return "", [
                 ValidationIssue("contact", f"{CONTACT_TOO_SHORT}，客户已建但联系方式留空，请补录")
@@ -848,8 +862,13 @@ class SortingService:
         self, *, status: str | None = None, limit: int = 50
     ) -> tuple[list[dict], list[ValidationIssue]]:
         """分拣单列表（倒序）：可按状态过滤；每条带 `lead_name`（归属未定时为空）、
-        `dropped_count`（投料时被丢弃的要素条数，供列表标「有丢弃」）与
-        `content_preview`（原文前 60 字，超出加 `…`；原文缺失或为空就是空串）。"""
+        `dropped_count`（投料时被丢弃的要素条数，供列表标「有丢弃」）、
+        `content_preview`（原文前 60 字，超出加 `…`；原文缺失或为空就是空串）与
+        `suggested_new_name`（新建客户名建议；取不到是空串）。
+
+        列表也带建议名，是为了让待认领池的卡片直接把名字填进输入框——
+        不平白多一次「点开单条才拿得到名字」的往返。
+        """
         issues: list[ValidationIssue] = []
         if (
             isinstance(limit, bool)
@@ -890,12 +909,19 @@ class SortingService:
             # 原文摘要同理：列表只给前 60 字够认单，全文留给单条接口。
             raw = self._raws.get(item.raw_id)
             body["content_preview"] = _preview(raw.content if raw is not None else "")
+            body["suggested_new_name"] = self._suggested_name_of(item)
             items.append(body)
         return items, []
 
+    def _suggested_name_of(self, batch: SortingBatch) -> str:
+        """这张单建议的新客户名（只读、不落库）：从已过出处校验的要素里取。"""
+        elements, _skipped = self._validated_elements(batch, batch.lead_id)
+        return suggested_new_name(elements)
+
     def get_batch(self, batch_id: str) -> tuple[dict | None, list[ValidationIssue]]:
         """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）、
-        投料原文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。
+        投料原文（`content`）、归属候选（`lead_candidates`）、丢弃诊断（`dropped`）
+        与新建客户名建议（`suggested_new_name`；取不到是空串、只作建议不落库）。
 
         `suggestion.grading` **按规则现算**（与 `POST /sorting`、客户详情页同一个函数），
         不是模型自报的那份；模型给的那份原样放 `suggestion.model_grading` 供对比，
@@ -907,30 +933,32 @@ class SortingService:
 
         lead = self._leads.get(batch.lead_id) if batch.lead_id else None
         raw = self._raws.get(batch.raw_id)
+        # 要素只校验一次：建议视图与建议名都用这一份，不重复算、也不会有两个结论。
+        elements, _skipped = self._validated_elements(batch, batch.lead_id)
         body = _summary(batch, lead.name if lead is not None else None)
         body.update(
             {
                 "raw_id": batch.raw_id,
                 "content": raw.content if raw is not None else "",
                 "suggestion_json": batch.suggestion_json,
-                "suggestion": self._suggestion_view(batch),
+                "suggestion": self._suggestion_view(batch, elements),
                 "lead_candidates": _loads_items(batch.candidates_json),
                 "dropped": _loads_items(batch.dropped_json),
+                "suggested_new_name": suggested_new_name(elements),
             }
         )
         return body, []
 
-    def _suggestion_view(self, batch: SortingBatch) -> dict:
+    def _suggestion_view(self, batch: SortingBatch, elements: list[ElementHit]) -> dict:
         """单条视图里的 `suggestion`：键与 `POST /sorting` 完全对齐（同一套词，前端只认一遍）。
 
         - `elements` / `model_grading`：模型原文里的那两份；
-        - `grading`：按规则现算，与投料时同一份要素、同一个函数；
+        - `grading`：按规则现算（`elements` 由调用方校验过一次，这里直接用）；
         - `grading_source`：恒为 `rule`，标明这张单的档位来源；
         - `next_action`：按缺项规则**现在重算**（`value_offered` 取模板），模型写的那份
           `value_offered` 放进 `model_value_offered`——前端展示的是规则值，模型值只作附注。
         """
         payload = _loads(batch.suggestion_json) or {}
-        elements, _skipped = self._validated_elements(batch, batch.lead_id)
         raw_elements = payload.get("elements")
         return {
             "elements": raw_elements if isinstance(raw_elements, list) else [],

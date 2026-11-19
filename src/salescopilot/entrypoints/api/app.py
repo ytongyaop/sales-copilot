@@ -328,8 +328,13 @@ ReviewDep = Annotated[ReviewService, Depends(get_review_service)]
 ShelfDep = Annotated[ShelfService, Depends(get_shelf_service)]
 
 
+def _issues(issues: list[ValidationIssue]) -> list[dict]:
+    """把校验结果翻成前端只认的一种形状：`[{"location", "message"}]`。"""
+    return [{"location": issue.location, "message": issue.message} for issue in issues]
+
+
 def _issue_body(issues: list[ValidationIssue]) -> dict:
-    return {"issues": [{"location": i.location, "message": i.message} for i in issues]}
+    return {"issues": _issues(issues)}
 
 
 def _lead_body(lead: Lead) -> dict:
@@ -692,17 +697,22 @@ def get_settings() -> dict:
 
 @app.post("/leads", status_code=201)
 def create_lead(payload: LeadIn, service: LeadDep):
-    """新建线索：成功 201 返回完整实体，校验失败 422 返回问题列表。"""
-    result = service.create(
+    """新建线索：成功 201 返回完整实体（附 `warnings`），校验失败 422 返回问题列表。
+
+    联系方式**可以为空**（0.1.3）：真实聊天记录常常只提到人名或单位，客户照建，
+    这时照样 201，`warnings` 里一条「没有联系方式，客户已建但无法触达，请后续补录」；
+    没有提醒时 `warnings` 是空数组（前端不用判断字段在不在）。
+    """
+    outcome = service.create_lead(
         name=payload.name,
         contact=payload.contact,
         source=payload.source,
         owner=payload.owner,
         template=payload.template,
     )
-    if isinstance(result, list):
-        return JSONResponse(status_code=422, content=_issue_body(result))
-    return _lead_body(result)
+    if outcome.lead is None:
+        return JSONResponse(status_code=422, content=_issue_body(outcome.issues))
+    return {**_lead_body(outcome.lead), "warnings": _issues(outcome.warnings)}
 
 
 @app.get("/leads")
@@ -1130,6 +1140,8 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
     灰区与新客户一律进待认领池（`status=pending_claim`，`lead_id` 为 null）。
     `lead_candidates` 是这次落库的候选（`[{"lead_id","name","score","scorer"}]`），
     与 `GET /sorting/batches/{id}` 回的是同一份，没有候选就是 `[]`。
+    `suggested_new_name` 是「新建客户时建议用的名字」（从基础信息要素里取，取不到是空串）：
+    只是建议，不落库，人在待认领池里可以改名。
     原文不合格、模型失败或没有任何可用要素时 422（线索不存在 404），不生成分拣单。
     """
     outcome = service.sort(content=payload.content, source=payload.source, lead_id=payload.lead_id)
@@ -1148,6 +1160,7 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
         "suggestion": _suggestion_body(outcome.suggestion, outcome.model_grading),
         "lead_candidates": outcome.lead_candidates,
         "dropped": outcome.dropped,
+        "suggested_new_name": outcome.suggested_new_name,
     }
 
 
@@ -1155,9 +1168,9 @@ def submit_sorting(payload: SortingIn, service: SortingDep):
 def list_sorting_batches(service: SortingDep, status: str | None = None, limit: int = 50):
     """分拣单列表（新→旧）：`status` 可过滤（如 `pending_claim` 即待认领池）。
 
-    每条带 `lead_name`（归属未定时为 null）、`dropped_count`（丢了几条要素，整数）
-    与 `content_preview`（原文前 60 字，超出加 `…`）；
-    状态不认识或 `limit` 越界时 422。
+    每条带 `lead_name`（归属未定时为 null）、`dropped_count`（丢了几条要素，整数）、
+    `content_preview`（原文前 60 字，超出加 `…`）与 `suggested_new_name`
+    （新建客户名建议，取不到是空串）；状态不认识或 `limit` 越界时 422。
     """
     items, issues = service.list_batches(status=status, limit=limit)
     if issues:
@@ -1168,7 +1181,8 @@ def list_sorting_batches(service: SortingDep, status: str | None = None, limit: 
 @app.get("/sorting/batches/{batch_id}")
 def get_sorting_batch(batch_id: str, service: SortingDep):
     """单张分拣单：带模型原文（`suggestion_json`）、解析后的视图（`suggestion`）、
-    投料原文全文（`content`）、归属候选（`lead_candidates`）与丢弃诊断（`dropped`）。
+    投料原文全文（`content`）、归属候选（`lead_candidates`）、丢弃诊断（`dropped`）
+    与新建客户名建议（`suggested_new_name`，取不到是空串、只作建议不落库）。
 
     `suggestion.grading` 与 `POST /sorting` 是同一份（规则现算，`grading_source=rule`）；
     模型自报的那份在 `suggestion.model_grading`，两者可以不同——详情页显示的必须是前者。

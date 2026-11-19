@@ -12,7 +12,7 @@ def test_health_returns_ok_in_fake_mode(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.1.2",
+        "version": "0.1.3",
         "mode": "fake",
         "models": {"chat": "fake", "embed": "fake"},
     }
@@ -22,7 +22,7 @@ def test_health_reports_version() -> None:
     """`/health` 要带上包版本，部署方一眼能对上是哪个版本在跑。"""
     body = TestClient(app).get("/health").json()
 
-    assert body["version"] == "0.1.2"
+    assert body["version"] == "0.1.3"
     assert body["version"] == __version__
 
 

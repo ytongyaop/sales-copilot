@@ -183,6 +183,28 @@ def split_diagnostic(message: str) -> tuple[int | None, str]:
     return int(match.group(1)), match.group(2)
 
 
+# 能当「新客户名」的字段：只在基础信息里找——需求、金额、时间这些不能当名字。
+NEW_LEAD_NAME_FIELDS = ("company", "contact_person", "name")
+
+
+def suggested_new_name(elements: list[ElementHit]) -> str:
+    """从已过出处校验的要素里挑一个「新客户名」建议；挑不到返回空串。
+
+    只认 `card_section=basic` 且 `field` 在 `NEW_LEAD_NAME_FIELDS` 里的**第一条非空取值**：
+    真实聊天记录常常只有「某某公司」或「张总」，够认人、就够建客户（0.1.3 放宽新建门槛）。
+    这**只是建议**：不落库，人可以在界面上改名后再认领。
+    """
+    for element in elements:
+        if element.card_section != "basic":
+            continue
+        if element.field not in NEW_LEAD_NAME_FIELDS:
+            continue
+        value = element.value.strip()
+        if value:
+            return value
+    return ""
+
+
 def contact_from_elements(elements: list[ElementHit]) -> str:
     """从已过出处校验的要素里取联系方式：先认 `field='contact'`，再认取值里的手机号 / 邮箱。
 

@@ -18,6 +18,8 @@ PHONE_CONTENT = "13800001111 那边说预算三十万，下周一下午再聊"
 NEW_CONTENT = "完全不相干的一通闲聊，预算还在谈，下周再说"
 # 只有「需求」一条要素：模型按覆盖度会报 B，而规则那边金额 / 紧迫度 / 决策全未知 → needs_info。
 NEED_ONLY_CONTENT = "客户说预算还在谈，先给个报价单看看"
+# 只有公司名、没有电话：0.1.3 起要能给出「新建客户」的名字建议（不落库）。
+NAMED_CONTENT = "远大科技有限公司那边说预算还在谈，下周再说"
 # 超过 60 字的长原文：验列表摘要的截断（60 字 + 「…」）。
 LONG_CONTENT = (
     "华远建设有限公司的刘经理说，下周一上午十点方便再聊一次，预算大概三十万左右，"
@@ -104,6 +106,44 @@ def test_post_sorting_returns_201_with_four_blocks(client: TestClient) -> None:
     assert suggestion["model_grading"]["value"] in ("A", "B", "C")
     assert suggestion["next_action"]["action"]
     assert suggestion["next_action"]["value_offered"]
+
+
+def test_post_sorting_suggests_new_name_from_basic_element(client: TestClient) -> None:
+    """只提到公司名、没有电话：照样进待认领池，并给出「新建客户」的名字建议。
+
+    建议只读不落库：此时还没有任何客户被建出来（`GET /leads` 仍是投料前那一条）。
+    """
+    _lead_id(client)
+
+    response = _sort(client, NAMED_CONTENT)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "pending_claim"
+    assert body["suggested_new_name"] == "远大科技有限公司"
+    assert [item["name"] for item in client.get("/leads").json()] == [LEAD["name"]]
+
+
+def test_post_sorting_without_any_name_suggests_empty_string(client: TestClient) -> None:
+    """原文里连名字都没有：`suggested_new_name` 是空串（前端据此让人先填一个名字）。"""
+    _lead_id(client)
+
+    body = _sort(client, NEW_CONTENT).json()
+
+    assert body["suggested_new_name"] == ""
+
+
+def test_get_batch_and_list_carry_suggested_new_name(client: TestClient) -> None:
+    """单条与列表回的是同一个建议名（前端待认领池直接用列表里的那个预填输入框）。"""
+    _lead_id(client)
+    created = _sort(client, NAMED_CONTENT).json()
+
+    batch_id = created["batch_id"]
+    detail = client.get(f"/sorting/batches/{batch_id}").json()
+    listed = client.get("/sorting/batches", params={"status": "pending_claim"}).json()
+
+    assert detail["suggested_new_name"] == "远大科技有限公司"
+    assert [item["suggested_new_name"] for item in listed] == ["远大科技有限公司"]
 
 
 def test_post_sorting_without_lead_goes_to_pending_claim(client: TestClient) -> None:
